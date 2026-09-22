@@ -1,22 +1,17 @@
 import { serve } from "@hono/node-server";
-import { loadConfig } from "./config.js";
-import { openDatabase } from "./db/client.js";
 import { createApp } from "./app.js";
-import { FileService } from "./services/files.js";
+import { loadConfig } from "./config/env.js";
+import { buildContainer } from "./container.js";
+import { connectDatabase } from "./infrastructure/database/pool.js";
 
 const config = loadConfig();
-const pool = await openDatabase(config);
-const files = new FileService(pool, config);
-const app = createApp(files, config);
+const pool = await connectDatabase(config.DATABASE_URL);
+const app = createApp(buildContainer(config, pool));
 
-console.log(
-  `signed-file-api listening on http://${config.HOST}:${config.PORT} (base ${config.BASE_URL})`,
-);
-
-const server = serve({
-  fetch: app.fetch,
-  hostname: config.HOST,
-  port: config.PORT,
+const server = serve({ fetch: app.fetch, hostname: config.HOST, port: config.PORT }, () => {
+  console.log(
+    `signed-file-api listening on http://${config.HOST}:${config.PORT} (base ${config.BASE_URL})`,
+  );
 });
 
 async function shutdown() {

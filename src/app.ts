@@ -1,34 +1,28 @@
 import { Hono } from "hono";
-import type { AppConfig } from "./config.js";
-import type { FileService } from "./services/files.js";
-import { HttpError } from "./services/files.js";
-import { createFilesRouter } from "./routes/files.js";
-import { createDownloadRouter } from "./routes/download.js";
+import { errorHandler, notFoundHandler } from "./common/errors/error-handler.js";
+import { requireUser } from "./common/middleware/require-user.js";
+import type { AppEnv } from "./common/types/app-env.js";
+import type { Container } from "./container.js";
+import { createAuditRoutes } from "./modules/audit/audit.routes.js";
+import { createDownloadsRoutes } from "./modules/downloads/downloads.routes.js";
+import { createFilesRoutes } from "./modules/files/files.routes.js";
+import { createHealthRoutes } from "./modules/health/health.routes.js";
+import { createSignedLinksRoutes } from "./modules/signed-links/signed-links.routes.js";
 
-export function createApp(files: FileService, config: AppConfig) {
-  const app = new Hono();
+export function createApp(container: Container) {
+  const app = new Hono<AppEnv>();
 
-  app.get("/health", (c) =>
-    c.json({
-      status: "ok",
-      service: "signed-file-api",
-      maxUploadBytes: config.MAX_UPLOAD_BYTES,
-    }),
-  );
+  app.use("/files", requireUser);
+  app.use("/files/*", requireUser);
 
-  app.route("/files", createFilesRouter(files));
-  app.route("/download", createDownloadRouter(files, config));
+  app.route("/health", createHealthRoutes(container.health));
+  app.route("/files", createFilesRoutes(container.files));
+  app.route("/files", createSignedLinksRoutes(container.signedLinks));
+  app.route("/files", createAuditRoutes(container.audit));
+  app.route("/download", createDownloadsRoutes(container.downloads));
 
-  app.onError((err, c) => {
-    if (err instanceof HttpError) {
-      return c.json({ error: err.message, code: err.code }, err.status as 400);
-    }
-
-    console.error("Unhandled error", err);
-    return c.json({ error: "Internal server error", code: "INTERNAL" }, 500);
-  });
-
-  app.notFound((c) => c.json({ error: "Not found", code: "NOT_FOUND" }, 404));
+  app.onError(errorHandler);
+  app.notFound(notFoundHandler);
 
   return app;
 }

@@ -73,6 +73,34 @@ flowchart TD
 5. **Link management** — Owners can list all signed links ever generated for a file (`GET /files/:id/links`) with status (`active`/`revoked`) and revoke any active link before its natural expiry (`POST /files/:id/links/:linkId/revoke`).
 6. **Audit** — `GET /files/:id/audit` returns the full event history: generation, successful downloads, rejected downloads, revocations, renames, and deletes. Audit events have **no foreign key to `files`**, by design — an audit trail must remain queryable after the resource it describes is gone.
 
+## Layered request flow (Controller → Service → Repository)
+
+Every endpoint follows the same path through the layers. Signed-link download is shown here as an example:
+
+```mermaid
+flowchart LR
+  Req["GET /download?fileId&expires&sig"] --> Route[downloads.routes.ts]
+  Route --> Ctrl[DownloadFileController<br/>parse query, build Response]
+  Ctrl --> Svc[DownloadFileService<br/>orchestrates the use case]
+  Svc --> Signer[UrlSigner<br/>stateless HMAC + expiry]
+  Svc --> Access[FileAccessService<br/>resolve file]
+  Svc --> Redeem[RedeemSignedLinkService<br/>provenance + revocation + audit]
+  Svc --> Blob[BlobStorage interface]
+  Access --> FileRepo[FileRepository interface]
+  Redeem --> LinkRepo[SignedLinkRepository interface]
+  Redeem --> Audit[RecordAuditEventService]
+  Audit --> AuditRepo[AuditRepository interface]
+  FileRepo -.-> PG[(PostgreSQL)]
+  LinkRepo -.-> PG
+  AuditRepo -.-> PG
+  Blob -.-> FS[(Local disk)]
+```
+
+- **Controllers** only translate HTTP to and from a service call.
+- **Services** hold one use case each, and depend on repository and storage **interfaces**, not concrete implementations.
+- **Repositories** own the SQL for a single table.
+- `container.ts` is the composition root. It binds each interface to its implementation (`Pg*Repository`, `LocalBlobStorage`), so a different backend such as DigitalOcean Spaces means adding an implementation without editing any service.
+
 ## Why Postgres instead of only stateless HMAC verification
 
 The signature alone is enough to prove a link *could* have come from this service, but storing the generated link in Postgres adds real product value beyond cryptographic proof:

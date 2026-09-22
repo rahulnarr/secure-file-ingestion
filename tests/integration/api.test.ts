@@ -1,94 +1,24 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Pool } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createApp } from "../src/app.js";
-import { loadConfig } from "../src/config.js";
-import { openDatabase } from "../src/db/client.js";
-import {
-  createSignedDownloadUrl,
-  verifySignedDownload,
-} from "../src/lib/signing.js";
-import { FileService } from "../src/services/files.js";
+import type { Pool } from "pg";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createApp } from "../../src/app.js";
+import { loadConfig } from "../../src/config/env.js";
+import { buildContainer } from "../../src/container.js";
+import { connectDatabase } from "../../src/infrastructure/database/pool.js";
 
 const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   "postgres://postgres:postgres@127.0.0.1:5432/signed_file_api_test";
-
-function makeTempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "signed-file-api-"));
-}
-
-describe("signing", () => {
-  it("creates and verifies a signed URL", () => {
-    const secret = "unit-test-signing-secret";
-    const signed = createSignedDownloadUrl({
-      baseUrl: "http://127.0.0.1:3847",
-      secret,
-      fileId: "file-1",
-      ttlSeconds: 60,
-      nowMs: 1_700_000_000_000,
-    });
-
-    const result = verifySignedDownload({
-      secret,
-      fileId: "file-1",
-      expires: String(signed.expiresAt),
-      signature: signed.signature,
-      nowMs: 1_700_000_000_000,
-    });
-
-    expect(result.ok).toBe(true);
-  });
-
-  it("rejects expired and tampered signatures", () => {
-    const secret = "unit-test-signing-secret";
-    const signed = createSignedDownloadUrl({
-      baseUrl: "http://127.0.0.1:3847",
-      secret,
-      fileId: "file-1",
-      ttlSeconds: 10,
-      nowMs: 1_700_000_000_000,
-    });
-
-    const expired = verifySignedDownload({
-      secret,
-      fileId: "file-1",
-      expires: String(signed.expiresAt),
-      signature: signed.signature,
-      nowMs: 1_700_000_020_000,
-    });
-    expect(expired.ok).toBe(false);
-
-    const tampered = verifySignedDownload({
-      secret,
-      fileId: "other-file",
-      expires: String(signed.expiresAt),
-      signature: signed.signature,
-      nowMs: 1_700_000_000_000,
-    });
-    expect(tampered.ok).toBe(false);
-  });
-});
 
 describe("API integration", () => {
   let tempRoot = "";
   let app: ReturnType<typeof createApp>;
   let pool: Pool;
 
-  beforeAll(async () => {
-    const setupPool = new Pool({ connectionString: TEST_DATABASE_URL });
-    await setupPool.query(
-      "TRUNCATE TABLE audit_events, signed_links, files RESTART IDENTITY CASCADE",
-    ).catch(() => {
-      // Tables may not exist yet on a fresh DB; openDatabase() below creates them.
-    });
-    await setupPool.end();
-  });
-
   beforeEach(async () => {
-    tempRoot = makeTempRoot();
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "signed-file-api-"));
     const config = loadConfig({
       PORT: "3847",
       HOST: "127.0.0.1",
@@ -99,21 +29,20 @@ describe("API integration", () => {
       DATABASE_URL: TEST_DATABASE_URL,
       MAX_UPLOAD_BYTES: "1048576",
     });
-    pool = await openDatabase(config);
+    pool = await connectDatabase(config.DATABASE_URL);
     await pool.query("TRUNCATE TABLE audit_events, signed_links, files RESTART IDENTITY CASCADE");
-    const files = new FileService(pool, config);
-    app = createApp(files, config);
+    app = createApp(buildContainer(config, pool));
   });
 
   afterEach(async () => {
-    if (tempRoot) {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
     await pool.end();
   });
 
-  afterAll(async () => {
-    // no-op: each test manages its own pool lifecycle
+  it("rejects requests without X-User-Id", async () => {
+    const res = await app.request("/files");
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { code: string }).code).toBe("MISSING_USER");
   });
 
   it("uploads a private file, lists metadata, signs a link, and downloads it", async () => {

@@ -121,26 +121,55 @@ docker compose up -d postgres
 # create the test DB once:
 PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE signed_file_api_test;"
 
-npm test
+npm test                  # everything
+npm run test:unit         # services against in-memory fakes; no database needed
+npm run test:integration  # full HTTP stack against real Postgres
 npm run typecheck
 ```
 
 CI (`.github/workflows/ci.yml`) spins up a Postgres service container automatically — no local setup needed there.
 
-## Project layout
+## Code structure
+
+The code follows **Controller → Service → Repository** with one class per use case (Single Responsibility), grouped by domain module.
+
+| Layer | Responsibility | Knows about |
+|---|---|---|
+| **Routes** (`*.routes.ts`) | Map HTTP method + path to a controller | Controllers |
+| **Controllers** (`controllers/`) | Parse/validate the HTTP request, call one service, shape the HTTP response | Hono `Context`, schemas, mappers, one service |
+| **Services** (`services/`) | One business use case each: rules, ownership, orchestration, audit | Repository/storage **interfaces**, other services |
+| **Repositories** (`*.repository.ts`) | SQL for one table, behind an interface | `pg` only |
+| **Infrastructure** | Cross-cutting technical concerns: DB pool + migrations, blob storage, URL signing | Node / `pg` |
+
+Services never see HTTP, and controllers never see SQL. `src/container.ts` is the only file that instantiates concrete classes (`PgFileRepository`, `LocalBlobStorage`, and so on) and wires them together. That's why the unit tests can swap in in-memory fakes, and why moving blobs to DigitalOcean Spaces would mean writing one new `BlobStorage` implementation.
 
 ```
 src/
-  app.ts              Hono app + error handling
-  index.ts            Server entry
-  config.ts           Env validation (zod)
-  db/client.ts        Postgres pool + migrations (files, signed_links, audit_events)
-  lib/signing.ts      HMAC create/verify (fileId + TTL -> signature)
-  routes/             HTTP handlers
-  services/files.ts   Upload, ownership, signing, link persistence/revocation, audit
-docs/architecture.md  Lifecycle diagram
-docker-compose.yml    Local Postgres for dev/test
-.github/workflows/ci.yml
+  index.ts                         Bootstrap: config -> DB -> container -> HTTP server
+  app.ts                           Mounts module routes, auth middleware, error handlers
+  container.ts                     Composition root (dependency wiring)
+  config/env.ts                    Env validation (zod)
+  common/
+    errors/                        HttpError, global error + 404 handlers
+    middleware/require-user.ts     X-User-Id authentication
+    types/app-env.ts               Typed request context
+    validation/                    UUID, batch-size, JSON body parsing helpers
+  infrastructure/
+    database/                      Pool + idempotent migrations
+    storage/                       BlobStorage interface + LocalBlobStorage
+    crypto/url-signer.ts           HMAC-SHA256 sign/verify (fileId + TTL)
+  modules/
+    files/                         upload, batch upload, list, get, update, delete, batch delete
+      controllers/  services/  file.repository.ts  file.mapper.ts  file.schemas.ts  file.types.ts
+    signed-links/                  create, list, revoke, redeem
+      controllers/  services/  signed-link.repository.ts  ...
+    downloads/                     public signed-URL download
+    audit/                         record + list audit events
+    health/                        liveness
+tests/
+  unit/                            Services + signer with in-memory fakes (tests/unit/fakes.ts)
+  integration/                     Full HTTP stack against Postgres
+docs/architecture.md               Request lifecycle diagram
 ```
 
 ## Design choices
