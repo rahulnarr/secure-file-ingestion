@@ -23,7 +23,10 @@ See [docs/architecture.md](docs/architecture.md) for the request lifecycle diagr
 
 ## Deployment
 
-Runs on a DigitalOcean Droplet (file blobs need a real persistent disk) with a Managed PostgreSQL cluster, deployed automatically by `.github/workflows/deploy.yml` on every push to `main` — full test suite first, deploy only if it's green. See [infra/README.md](infra/README.md) for the one-time provisioning/setup commands and the GitHub Actions secrets required.
+Two supported targets, same code and same Postgres schema either way — only the blob storage backend (`STORAGE_BACKEND`) differs:
+
+- **Droplet** (default) — a VM with a persistent disk for file blobs, plus a Managed PostgreSQL cluster, deployed automatically by `.github/workflows/deploy.yml` on every push to `main` (full test suite → infrastructure health checks → deploy). See [infra/README.md](infra/README.md).
+- **App Platform + Spaces** (alternative) — a fully managed, auto-scaling container; since its filesystem is ephemeral, blobs go to DO Spaces instead of local disk via `SpacesBlobStorage`. Deploys itself on every push to `main` (App Platform's own git-push CI/CD), no separate workflow needed. See [infra/app-platform/README.md](infra/app-platform/README.md).
 
 ## Quick start
 

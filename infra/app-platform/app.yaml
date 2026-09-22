@@ -1,0 +1,74 @@
+# DigitalOcean App Platform spec — the alternative to the Droplet deployment
+# in infra/. App Platform builds and runs this service in a managed,
+# auto-scaling container instead of a VM you patch yourself; the tradeoff is
+# that its filesystem is ephemeral, so STORAGE_BACKEND=spaces is required
+# here (see docs/architecture.md for the Droplet vs. App Platform tradeoffs,
+# and src/infrastructure/storage/spaces-blob-storage.ts for the code side).
+#
+# Deploy with: doctl apps create --spec infra/app-platform/app.yaml --wait
+# Update with: doctl apps update <app-id> --spec infra/app-platform/app.yaml --wait
+#
+# Secrets below are placeholders — infra/app-platform/README.md documents
+# generating a real spec with them substituted before `doctl apps create`.
+name: signed-file-api
+region: nyc
+
+services:
+  - name: api
+    github:
+      repo: rahulnarr/secure-file-ingestion
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: npm ci && npm run build
+    run_command: npm run start:prod
+    environment_slug: node-js
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    http_port: 3847
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 10
+    envs:
+      - key: BASE_URL
+        value: ${APP_URL}
+      - key: STORAGE_BACKEND
+        value: spaces
+      - key: SPACES_ENDPOINT
+        value: SPACES_ENDPOINT_PLACEHOLDER
+      - key: SPACES_REGION
+        value: SPACES_REGION_PLACEHOLDER
+      - key: SPACES_BUCKET
+        value: SPACES_BUCKET_PLACEHOLDER
+      - key: SPACES_ACCESS_KEY_ID
+        type: SECRET
+        value: SPACES_ACCESS_KEY_ID_PLACEHOLDER
+      - key: SPACES_SECRET_ACCESS_KEY
+        type: SECRET
+        value: SPACES_SECRET_ACCESS_KEY_PLACEHOLDER
+      - key: SIGNING_SECRET
+        type: SECRET
+        value: SIGNING_SECRET_PLACEHOLDER
+      - key: DATABASE_URL
+        type: SECRET
+        value: DATABASE_URL_PLACEHOLDER
+      - key: DATABASE_SSL_CA_BASE64
+        type: SECRET
+        value: DATABASE_SSL_CA_BASE64_PLACEHOLDER
+      - key: MAX_UPLOAD_BYTES
+        value: "26214400"
+      - key: MAX_BATCH_SIZE
+        value: "20"
+      - key: MAX_TTL_SECONDS
+        value: "86400"
+      - key: LOG_LEVEL
+        value: info
+      - key: RETRY_MAX_ATTEMPTS
+        value: "4"
+      - key: RETRY_BASE_DELAY_MS
+        value: "100"
+      - key: RETRY_MAX_DELAY_MS
+        value: "2000"
+      - key: RETRY_MAX_ELAPSED_MS
+        value: "10000"

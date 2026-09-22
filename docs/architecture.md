@@ -95,6 +95,10 @@ The signature alone is enough to prove a link *could* have come from this servic
 
 ## Deployment (DigitalOcean)
 
+Two supported targets. Same application code and Postgres schema either way — `STORAGE_BACKEND` is the only thing that changes.
+
+### Option A: Droplet + local disk (default)
+
 ```mermaid
 flowchart LR
   Dev[git push origin main] --> GHA[GitHub Actions: deploy.yml]
@@ -106,14 +110,33 @@ flowchart LR
   Droplet --> Disk[(Droplet's local disk: uploads/)]
 ```
 
-- **File bytes** (`UPLOAD_DIR`) stay on local disk on the Droplet — this is why the target is a Droplet with a persistent volume, not App Platform's ephemeral filesystem or a multi-instance deployment (see the Droplet vs. App Platform discussion above).
+- **File bytes** (`UPLOAD_DIR`) stay on local disk on the Droplet — this needs a Droplet with a persistent volume, not App Platform's ephemeral filesystem or a multi-instance deployment.
 - **Metadata, signed links, and audit events** live in a DigitalOcean **Managed PostgreSQL** cluster — same `DATABASE_URL`-driven config as local dev, no code changes.
 - **Caddy** terminates TLS (automatic, once a domain is pointed at the Droplet) and reverse-proxies to the app, which only listens on `127.0.0.1`; the DO Firewall exposes just 22/80/443.
-- See [`infra/README.md`](../infra/README.md) for the exact provisioning and deploy commands, and `.github/workflows/deploy.yml` for the CI/CD pipeline that runs the test suite before every deploy.
+- See [`infra/README.md`](../infra/README.md) for the exact provisioning and deploy commands, and `.github/workflows/deploy.yml` for the CI/CD pipeline (test → verify-droplet → verify-database → deploy) that gates every deploy.
+
+### Option B: App Platform + Spaces (alternative)
+
+```mermaid
+flowchart LR
+  Dev[git push origin main] --> AP[App Platform:<br/>auto build + deploy]
+  AP --> Container[Managed container<br/>node dist/index.js]
+  Container --> Spaces[(DO Spaces: uploads)]
+  Container --> PG[(DO Managed PostgreSQL)]
+```
+
+- **App Platform** builds and runs the container itself — no Droplet to patch, and it can raise `instance_count` as traffic grows without any infrastructure change on your part.
+- Its filesystem is ephemeral, so `STORAGE_BACKEND=spaces` is required — file bytes go to a DO Spaces bucket via `SpacesBlobStorage` (`src/infrastructure/storage/spaces-blob-storage.ts`) instead of local disk. This is also what makes it safe to run more than one instance: any instance can serve any file.
+- Deploys itself on every push to `main` (`deploy_on_push: true` in the app spec) — no separate GitHub Actions workflow for this target.
+- See [`infra/app-platform/README.md`](../infra/app-platform/README.md) for the exact provisioning commands.
+
+### Which one to use
+
+The Droplet is the default because it needs no external object-storage account and matches "store it in a non-public directory on the local file system" most directly for a single-instance deployment. App Platform + Spaces is the better choice once horizontal scaling actually matters — see the next section.
 
 ## Scalability & future architecture
 
-The current setup (one Droplet, local disk, synchronous writes) is deliberately the simplest thing that's actually correct and deployable. It has two structural limits worth planning for before they become a problem: **the API can't scale horizontally** because each instance owns its own local disk, and **every request pays for a synchronous Postgres write** even for things that don't need to block the response (audit logging, link-generation bookkeeping).
+Horizontal scaling of the API is already solved — that's exactly what App Platform + `SpacesBlobStorage` (Option B above) gets you today: statelessness via object storage instead of local disk, any instance serving any file. What's left is the database side: **every request still pays for a synchronous Postgres write** even for things that don't need to block the response (audit logging, link-generation bookkeeping), and there's no read-scaling or data-retention story yet for a table that grows unboundedly.
 
 ```mermaid
 flowchart LR
@@ -133,8 +156,6 @@ flowchart LR
 
 **Decouple writes from the request path with Kafka.** Generating a signed link and recording an audit event are both writes that don't need to complete before the API responds. Publishing `link.generated` / `audit.event` to Kafka and letting async consumer workers persist them to Postgres means a spike in link-generation or audit-heavy traffic gets absorbed by the topic's backlog instead of directly hammering the database's write throughput or slowing down the request. The `/download` path's revocation check still needs a synchronous read, so it stays as-is — this is specifically for the write-heavy, latency-insensitive side.
 
-**Move file bytes to DO Spaces.** Local disk is why the API can only run as one instance today. Once blobs live in S3-compatible object storage instead, any API instance can serve any file, which is what actually unlocks horizontal scaling behind a load balancer — this is the same App Platform vs. Droplet tradeoff from earlier in this document, just resolved differently once statelessness is worth the extra moving part.
-
 **Scale PostgreSQL two ways.** Vertically (a bigger Managed Database tier) is the first lever and needs zero application changes. Horizontally, read replicas offload the read-heavy paths (listing files, fetching metadata, ownership checks) from the primary, which then only has to handle writes. For the `audit_events` table specifically — the one table that grows unboundedly — range-partitioning by `created_at` (e.g. monthly partitions) keeps individual indexes small and makes retention (dropping old partitions) cheap compared to `DELETE` at scale.
 
-**Add alpha/beta environments to CI/CD.** Right now `main` deploys straight to production once tests pass. The natural next step is `alpha` → `beta` → `production` as separate Droplets/environments, each gated by the same test suite plus its own integration-test coverage report, so a regression surfaces in alpha traffic before it reaches real users — the same tests, staged, not new ones.
+**Add alpha/beta environments to CI/CD.** Right now `main` deploys straight to production once tests pass. The natural next step is `alpha` → `beta` → `production` as separate environments (Droplets, or App Platform apps), each gated by the same test suite plus its own integration-test coverage report, so a regression surfaces in alpha traffic before it reaches real users — the same tests, staged, not new ones.

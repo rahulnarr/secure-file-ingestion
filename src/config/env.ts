@@ -22,10 +22,22 @@ const envSchema = z.object({
   MAX_TTL_SECONDS: z.coerce.number().int().positive().max(31_536_000).default(86_400),
 
   // --- Storage ---
+  // "local" (default) fits a single Droplet with a persistent volume.
+  // "spaces" uses DO Spaces (S3-compatible) instead, making the API
+  // stateless — the precondition for running on App Platform or behind a
+  // load balancer with multiple instances. See docs/architecture.md.
+  STORAGE_BACKEND: z.enum(["local", "spaces"]).default("local"),
   DATA_DIR: z.string().default("./data"),
   UPLOAD_DIR: z.string().default("./data/uploads"),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
   MAX_BATCH_SIZE: z.coerce.number().int().positive().max(200).default(20),
+
+  // --- DO Spaces (only required when STORAGE_BACKEND=spaces) ---
+  SPACES_ENDPOINT: z.string().url().optional(),
+  SPACES_REGION: z.string().optional(),
+  SPACES_BUCKET: z.string().optional(),
+  SPACES_ACCESS_KEY_ID: z.string().optional(),
+  SPACES_SECRET_ACCESS_KEY: z.string().optional(),
 
   // --- Database ---
   DATABASE_URL: z
@@ -51,6 +63,24 @@ const envSchema = z.object({
   RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(100),
   RETRY_MAX_DELAY_MS: z.coerce.number().int().positive().default(2_000),
   RETRY_MAX_ELAPSED_MS: z.coerce.number().int().positive().default(10_000),
+}).superRefine((config, ctx) => {
+  if (config.STORAGE_BACKEND !== "spaces") return;
+  const required = [
+    "SPACES_ENDPOINT",
+    "SPACES_REGION",
+    "SPACES_BUCKET",
+    "SPACES_ACCESS_KEY_ID",
+    "SPACES_SECRET_ACCESS_KEY",
+  ] as const;
+  for (const key of required) {
+    if (!config[key]) {
+      ctx.addIssue({
+        code: "custom",
+        path: [key],
+        message: `${key} is required when STORAGE_BACKEND=spaces`,
+      });
+    }
+  }
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {
@@ -78,5 +108,16 @@ export function retryPolicyFromConfig(config: AppConfig): RetryPolicyConfig {
     baseDelayMs: config.RETRY_BASE_DELAY_MS,
     maxDelayMs: config.RETRY_MAX_DELAY_MS,
     maxElapsedMs: config.RETRY_MAX_ELAPSED_MS,
+  };
+}
+
+/** Only valid to call when STORAGE_BACKEND=spaces — enforced by the schema's superRefine. */
+export function spacesConfigFromConfig(config: AppConfig) {
+  return {
+    endpoint: config.SPACES_ENDPOINT!,
+    region: config.SPACES_REGION!,
+    bucket: config.SPACES_BUCKET!,
+    accessKeyId: config.SPACES_ACCESS_KEY_ID!,
+    secretAccessKey: config.SPACES_SECRET_ACCESS_KEY!,
   };
 }

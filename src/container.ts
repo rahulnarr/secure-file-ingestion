@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { retryPolicyFromConfig, type AppConfig } from "./config/env.js";
+import { retryPolicyFromConfig, spacesConfigFromConfig, type AppConfig } from "./config/env.js";
 import { UrlSigner } from "./infrastructure/crypto/url-signer.js";
 import { createLogger, type Logger } from "./infrastructure/logging/logger.js";
 import { Metrics } from "./infrastructure/metrics/metrics.js";
@@ -11,6 +11,7 @@ import { wrapDatabaseError, wrapStorageError } from "./infrastructure/resilience
 import { makeResilient } from "./infrastructure/resilience/resilient-proxy.js";
 import type { BlobStorage } from "./infrastructure/storage/blob-storage.js";
 import { LocalBlobStorage } from "./infrastructure/storage/local-blob-storage.js";
+import { SpacesBlobStorage } from "./infrastructure/storage/spaces-blob-storage.js";
 import { ListAuditEventsController } from "./modules/audit/controllers/list-audit-events.controller.js";
 import { PgAuditRepository } from "./modules/audit/audit.repository.js";
 import { ListAuditEventsService } from "./modules/audit/services/list-audit-events.service.js";
@@ -53,7 +54,7 @@ import { GetMetricsController } from "./modules/metrics/controllers/get-metrics.
 export function buildContainer(
   config: AppConfig,
   pool: Pool,
-  storage: BlobStorage = new LocalBlobStorage(config.uploadDirAbsolute),
+  storage: BlobStorage = createDefaultStorage(config),
   logger: Logger = createLogger(config.LOG_LEVEL),
   metrics: Metrics = new Metrics(),
 ) {
@@ -160,3 +161,10 @@ export function buildContainer(
 }
 
 export type Container = ReturnType<typeof buildContainer>;
+
+/** Picks the blob storage backend per STORAGE_BACKEND — see config/env.ts. */
+function createDefaultStorage(config: AppConfig): BlobStorage {
+  return config.STORAGE_BACKEND === "spaces"
+    ? new SpacesBlobStorage(spacesConfigFromConfig(config))
+    : new LocalBlobStorage(config.uploadDirAbsolute);
+}
