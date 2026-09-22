@@ -29,6 +29,7 @@ jobs:
           BASE_URL=${{ secrets.BASE_URL }}
           SIGNING_SECRET=${{ secrets.SIGNING_SECRET }}
           DATABASE_URL=${{ secrets.DATABASE_URL }}
+          DATABASE_SSL_CA_BASE64=${{ secrets.DATABASE_SSL_CA_BASE64 }}
           DATA_DIR=/opt/signed-file-api/data
           UPLOAD_DIR=/opt/signed-file-api/data/uploads
           MAX_UPLOAD_BYTES=26214400

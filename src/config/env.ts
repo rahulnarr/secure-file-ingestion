@@ -32,6 +32,11 @@ const envSchema = z.object({
     .string()
     .min(1, "DATABASE_URL is required, e.g. postgres://user:pass@host:5432/db")
     .default("postgres://postgres:postgres@127.0.0.1:5432/signed_file_api"),
+  // Base64-encoded PEM CA certificate for verifying a managed Postgres
+  // provider's TLS chain (e.g. DigitalOcean's per-cluster CA via
+  // `doctl databases get-ca`). Omitted for local/dev Postgres, which has no
+  // TLS in front of it.
+  DATABASE_SSL_CA_BASE64: z.string().optional(),
 
   // --- Logging ---
   LOG_LEVEL: z

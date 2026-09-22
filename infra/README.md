@@ -49,6 +49,7 @@ In the repo's **Settings > Secrets and variables > Actions**, add:
 | `DROPLET_HOST` | The Droplet's public IP from step 1 |
 | `DROPLET_SSH_KEY` | Contents of the **private** key file from step 1 (`cat ~/.ssh/signed_file_api_deploy`) |
 | `DATABASE_URL` | The Managed Postgres connection URI from step 1 |
+| `DATABASE_SSL_CA_BASE64` | The cluster's CA certificate (base64), also printed by `provision.sh` — the app verifies this rather than trusting any TLS cert (`src/infrastructure/database/pool.ts`) |
 | `SIGNING_SECRET` | `openssl rand -hex 32` |
 | `BASE_URL` | `http://<droplet-ip>` (or `https://<your-domain>` once DNS + Caddy are pointed at it) |
 

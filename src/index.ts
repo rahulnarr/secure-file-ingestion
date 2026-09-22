@@ -8,7 +8,7 @@ import { createLogger } from "./infrastructure/logging/logger.js";
 const config = loadConfig();
 const logger = createLogger(config.LOG_LEVEL);
 
-const pool = await connectDatabase(config.DATABASE_URL);
+const pool = await connectDatabase(config.DATABASE_URL, config.DATABASE_SSL_CA_BASE64);
 const app = createApp(buildContainer(config, pool, undefined, logger));
 
 const server = serve({ fetch: app.fetch, hostname: config.HOST, port: config.PORT }, () => {

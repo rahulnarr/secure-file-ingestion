@@ -52,9 +52,10 @@ log "SSH key ID: $DO_KEY_ID"
 DB_ID="$(doctl_id_by_name "databases" "$DB_NAME")"
 if [ -z "$DB_ID" ]; then
   log "Creating Managed PostgreSQL cluster $DB_NAME (this takes a few minutes)"
+  # `databases create` doesn't support --format/--no-header; use JSON + jq.
   DB_ID="$(doctl databases create "$DB_NAME" \
     --engine pg --version 16 --region "$REGION" --size "$DB_SIZE" --num-nodes 1 \
-    --format ID --no-header --wait)"
+    --wait -o json | jq -r '.[0].id')"
 fi
 log "Database cluster ID: $DB_ID"
 
@@ -63,7 +64,14 @@ if ! doctl databases db list "$DB_ID" --format Name --no-header | grep -qx "$DB_
   doctl databases db create "$DB_ID" "$DB_APP_NAME" >/dev/null
 fi
 
-DB_CONNECTION_URI="$(doctl databases connection "$DB_ID" --database "$DB_APP_NAME" --format URI --no-header)"
+# `databases connection` has no --database flag; fetch the admin URI as JSON
+# and swap in our application database name.
+DB_CONNECTION_JSON="$(doctl databases connection "$DB_ID" -o json)"
+DB_CONNECTION_URI="$(echo "$DB_CONNECTION_JSON" | jq -r --arg db "$DB_APP_NAME" '.uri | sub("/[a-zA-Z0-9_-]+\\?"; "/" + $db + "?")')"
+
+# The app verifies the cluster's TLS certificate (see src/infrastructure/
+# database/pool.ts) rather than trusting any cert, so it needs this CA.
+DB_CA_CERT_BASE64="$(doctl databases get-ca "$DB_ID" -o json | jq -r '.certificate')"
 
 # --- 3. Droplet ---------------------------------------------------------------
 DROPLET_ID="$(doctl_id_by_name "compute droplet" "$DROPLET_NAME")"
@@ -101,17 +109,19 @@ Provisioning complete.
   Droplet IP:        $DROPLET_IP
   Deploy SSH key:     $SSH_KEY_PATH (private, keep out of git)
   Database URI:       $DB_CONNECTION_URI
+  Database CA (base64, first 40 chars): ${DB_CA_CERT_BASE64:0:40}...
 
 Next steps:
   1. SSH in and run the server bootstrap script once:
        scp -i $SSH_KEY_PATH infra/setup-server.sh root@$DROPLET_IP:/root/
        ssh -i $SSH_KEY_PATH root@$DROPLET_IP 'REPO_URL=<your-git-url> bash /root/setup-server.sh'
   2. Add these as GitHub Actions repository secrets (Settings > Secrets > Actions):
-       DROPLET_HOST        = $DROPLET_IP
-       DROPLET_SSH_KEY      = (contents of $SSH_KEY_PATH)
-       DATABASE_URL         = $DB_CONNECTION_URI
-       SIGNING_SECRET       = (openssl rand -hex 32)
-       BASE_URL             = http://$DROPLET_IP   (or https://<your-domain> once DNS is set up)
+       DROPLET_HOST           = $DROPLET_IP
+       DROPLET_SSH_KEY        = (contents of $SSH_KEY_PATH)
+       DATABASE_URL           = $DB_CONNECTION_URI
+       DATABASE_SSL_CA_BASE64 = $DB_CA_CERT_BASE64
+       SIGNING_SECRET         = (openssl rand -hex 32)
+       BASE_URL               = http://$DROPLET_IP   (or https://<your-domain> once DNS is set up)
   3. Push to main — .github/workflows/deploy.yml will run tests, then deploy.
 =================================================================
 SUMMARY
