@@ -1,5 +1,6 @@
 import type { RetryPolicyConfig } from "../../config/env.js";
 import type { Logger } from "../logging/logger.js";
+import type { Metrics } from "../metrics/metrics.js";
 import { withRetry } from "./with-retry.js";
 
 /**
@@ -21,6 +22,7 @@ export function makeResilient<T extends object>(
   wrapError: (cause: unknown, context: { operation: string }) => Error,
   logger: Logger,
   label: string,
+  metrics?: Metrics,
 ): T {
   return new Proxy(target, {
     get(obj, prop, receiver) {
@@ -38,6 +40,7 @@ export function makeResilient<T extends object>(
             isRetryable,
             logger,
             { operation },
+            metrics,
           );
         } catch (cause) {
           throw wrapError(cause, { operation });

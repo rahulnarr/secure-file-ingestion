@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { retryPolicyFromConfig, type AppConfig } from "./config/env.js";
 import { UrlSigner } from "./infrastructure/crypto/url-signer.js";
 import { createLogger, type Logger } from "./infrastructure/logging/logger.js";
+import { Metrics } from "./infrastructure/metrics/metrics.js";
 import {
   isRetryableDatabaseError,
   isRetryableStorageError,
@@ -41,6 +42,7 @@ import { CreateSignedLinkService } from "./modules/signed-links/services/create-
 import { ListSignedLinksService } from "./modules/signed-links/services/list-signed-links.service.js";
 import { RedeemSignedLinkService } from "./modules/signed-links/services/redeem-signed-link.service.js";
 import { RevokeSignedLinkService } from "./modules/signed-links/services/revoke-signed-link.service.js";
+import { GetMetricsController } from "./modules/metrics/controllers/get-metrics.controller.js";
 
 /**
  * Composition root: the only place that knows concrete implementations.
@@ -53,6 +55,7 @@ export function buildContainer(
   pool: Pool,
   storage: BlobStorage = new LocalBlobStorage(config.uploadDirAbsolute),
   logger: Logger = createLogger(config.LOG_LEVEL),
+  metrics: Metrics = new Metrics(),
 ) {
   const signer = new UrlSigner(config.SIGNING_SECRET, config.BASE_URL);
   const retryPolicy = retryPolicyFromConfig(config);
@@ -64,6 +67,7 @@ export function buildContainer(
     wrapDatabaseError,
     logger,
     "FileRepository",
+    metrics,
   );
   const signedLinkRepository = makeResilient(
     new PgSignedLinkRepository(pool),
@@ -72,6 +76,7 @@ export function buildContainer(
     wrapDatabaseError,
     logger,
     "SignedLinkRepository",
+    metrics,
   );
   const auditRepository = makeResilient(
     new PgAuditRepository(pool),
@@ -80,6 +85,7 @@ export function buildContainer(
     wrapDatabaseError,
     logger,
     "AuditRepository",
+    metrics,
   );
   const resilientStorage = makeResilient(
     storage,
@@ -88,6 +94,7 @@ export function buildContainer(
     wrapStorageError,
     logger,
     "BlobStorage",
+    metrics,
   );
 
   const recordAudit = new RecordAuditEventService(auditRepository);
@@ -99,8 +106,12 @@ export function buildContainer(
 
   return {
     logger,
+    metrics,
     health: {
       health: new HealthController(config.MAX_UPLOAD_BYTES),
+    },
+    metricsModule: {
+      get: new GetMetricsController(metrics),
     },
     files: {
       upload: new UploadFileController(uploadFile),

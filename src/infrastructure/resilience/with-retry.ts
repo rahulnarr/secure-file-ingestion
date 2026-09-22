@@ -1,5 +1,6 @@
 import type { RetryPolicyConfig } from "../../config/env.js";
 import type { Logger } from "../logging/logger.js";
+import type { Metrics } from "../metrics/metrics.js";
 import { computeBackoffDelay, sleep } from "./backoff.js";
 
 export type RetryContext = {
@@ -12,7 +13,8 @@ export type RetryContext = {
  * says the failure is transient, up to whichever comes first: `maxAttempts`
  * total tries, or `maxElapsedMs` of wall-clock time — the "limited period"
  * the retry policy is bounded to. Every retry (and the final give-up) is
- * logged with the attempt number and delay for observability.
+ * logged with the attempt number and delay, and recorded as a metric, for
+ * observability.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
@@ -20,6 +22,7 @@ export async function withRetry<T>(
   isRetryable: (error: unknown) => boolean,
   logger: Logger,
   context: RetryContext,
+  metrics?: Metrics,
 ): Promise<T> {
   const startedAt = Date.now();
   let attempt = 0;
@@ -48,9 +51,13 @@ export async function withRetry<T>(
             ? "operation failed with a non-retryable error"
             : "retry budget exhausted",
         );
+        if (attempt > 1) {
+          metrics?.recordRetryExhausted(context.operation);
+        }
         throw error;
       }
 
+      metrics?.recordRetryAttempt(context.operation);
       const delayMs = computeBackoffDelay(attempt, policy.baseDelayMs, policy.maxDelayMs);
       logger.warn(
         { ...context, attempt, delayMs, elapsedMs, err: serializeForLog(error) },
