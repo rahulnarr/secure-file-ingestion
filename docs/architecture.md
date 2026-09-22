@@ -136,7 +136,20 @@ The signature alone is enough to prove a link *could* have come from this servic
 - **Auditability** — "list every link ever generated for this file" and "list every download attempt" are only possible with a persisted record.
 - **Restart safety is preserved** — Postgres, like the HMAC secret, is durable across process restarts, so this doesn't reintroduce the in-memory-state problem the signing scheme was designed to avoid.
 
-## Deployment note (DigitalOcean)
+## Deployment (DigitalOcean)
 
-- File bytes (`UPLOAD_DIR`) stay on local disk — this fits a single **Droplet** with a persistent volume. It intentionally would **not** survive on App Platform's ephemeral filesystem or a multi-instance deployment without moving blobs to DO Spaces.
-- Metadata, signed links, and audit events live in **Postgres** — this can be a Droplet-hosted instance for the exercise, or a DigitalOcean **Managed PostgreSQL** cluster in production, without any application code changes (just `DATABASE_URL`).
+```mermaid
+flowchart LR
+  Dev[git push origin main] --> GHA[GitHub Actions: deploy.yml]
+  GHA -->|1. run full test suite| CI[ci.yml, reused via workflow_call]
+  CI -->|pass| SCP[scp rendered .env]
+  SCP --> SSH[ssh: git pull, npm ci, npm run build, systemctl restart]
+  SSH --> Droplet[Droplet: Caddy :80/:443 -> node :3847]
+  Droplet --> PG[(DO Managed PostgreSQL)]
+  Droplet --> Disk[(Droplet's local disk: uploads/)]
+```
+
+- **File bytes** (`UPLOAD_DIR`) stay on local disk on the Droplet — this is why the target is a Droplet with a persistent volume, not App Platform's ephemeral filesystem or a multi-instance deployment (see the Droplet vs. App Platform discussion above).
+- **Metadata, signed links, and audit events** live in a DigitalOcean **Managed PostgreSQL** cluster — same `DATABASE_URL`-driven config as local dev, no code changes.
+- **Caddy** terminates TLS (automatic, once a domain is pointed at the Droplet) and reverse-proxies to the app, which only listens on `127.0.0.1`; the DO Firewall exposes just 22/80/443.
+- See [`infra/README.md`](../infra/README.md) for the exact provisioning and deploy commands, and `.github/workflows/deploy.yml` for the CI/CD pipeline that runs the test suite before every deploy.

@@ -19,6 +19,10 @@ Production-oriented REST service for private file uploads, metadata management, 
 
 See [docs/architecture.md](docs/architecture.md) for the request lifecycle diagram and the rationale for persisting signed links in Postgres.
 
+## Deployment
+
+Runs on a DigitalOcean Droplet (file blobs need a real persistent disk) with a Managed PostgreSQL cluster, deployed automatically by `.github/workflows/deploy.yml` on every push to `main` — full test suite first, deploy only if it's green. See [infra/README.md](infra/README.md) for the one-time provisioning/setup commands and the GitHub Actions secrets required.
+
 ## Quick start
 
 ```bash

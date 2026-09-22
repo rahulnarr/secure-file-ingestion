@@ -1,0 +1,72 @@
+name: Deploy
+
+# Runs the full test suite (via ci.yml) and only deploys to the
+# DigitalOcean Droplet if it passes. See infra/README.md for the one-time
+# server setup this depends on, and the repository secrets it requires.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Render production .env
+        run: |
+          cat > .env.deploy <<EOF
+          PORT=3847
+          HOST=127.0.0.1
+          BASE_URL=${{ secrets.BASE_URL }}
+          SIGNING_SECRET=${{ secrets.SIGNING_SECRET }}
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          DATA_DIR=/opt/signed-file-api/data
+          UPLOAD_DIR=/opt/signed-file-api/data/uploads
+          MAX_UPLOAD_BYTES=26214400
+          MAX_BATCH_SIZE=20
+          MAX_TTL_SECONDS=86400
+          LOG_LEVEL=info
+          RETRY_MAX_ATTEMPTS=4
+          RETRY_BASE_DELAY_MS=100
+          RETRY_MAX_DELAY_MS=2000
+          RETRY_MAX_ELAPSED_MS=10000
+          EOF
+
+      - name: Upload .env to the Droplet
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: ".env.deploy"
+          target: "/opt/signed-file-api"
+
+      - name: Pull, build, and restart the service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/signed-file-api
+            mv .env.deploy .env
+            git fetch origin main
+            git reset --hard origin/main
+            npm ci
+            npm run build
+            sudo systemctl restart signed-file-api
+            sleep 2
+            curl -sf http://127.0.0.1:3847/health
+
+      - name: Verify the public endpoint is healthy
+        run: curl -sf "${{ secrets.BASE_URL }}/health"

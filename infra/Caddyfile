@@ -1,0 +1,12 @@
+# Replace ":80" with your domain (e.g. "files.example.com") once DNS points
+# at this Droplet's IP — Caddy will then obtain and renew a free TLS
+# certificate automatically and this whole file otherwise stays the same.
+:80 {
+	reverse_proxy 127.0.0.1:3847
+
+	encode gzip
+
+	# Uploaded file bytes stay private; nothing here should ever be cached
+	# by an intermediary.
+	header Cache-Control "no-store"
+}

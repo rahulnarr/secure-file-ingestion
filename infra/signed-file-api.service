@@ -1,0 +1,24 @@
+[Unit]
+Description=signed-file-api
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/signed-file-api
+EnvironmentFile=/opt/signed-file-api/.env
+ExecStart=/usr/bin/node /opt/signed-file-api/dist/index.js
+Restart=on-failure
+RestartSec=3
+# The app listens on 127.0.0.1 only; Caddy is the only thing exposed publicly.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=signed-file-api
+
+# Light sandboxing — the service only needs to write inside its own data dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/signed-file-api/data
+
+[Install]
+WantedBy=multi-user.target

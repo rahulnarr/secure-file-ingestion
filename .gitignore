@@ -10,3 +10,4 @@ coverage/
 *.log
 uploads/
 tmp/
+.env.deploy
