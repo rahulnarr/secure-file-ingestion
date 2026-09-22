@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { FileService } from "../services/files.js";
-import { HttpError, toPublicFile } from "../services/files.js";
+import { HttpError, toPublicFile, toPublicSignedLink } from "../services/files.js";
 
 type Variables = {
   userId: string;
@@ -33,7 +33,7 @@ export function createFilesRouter(files: FileService) {
 
     const uploadedFile = fileField as File;
     const arrayBuffer = await uploadedFile.arrayBuffer();
-    const record = files.upload({
+    const record = await files.upload({
       userId,
       filename: uploadedFile.name || "upload.bin",
       contentType: uploadedFile.type || "application/octet-stream",
@@ -43,15 +43,15 @@ export function createFilesRouter(files: FileService) {
     return c.json({ file: toPublicFile(record) }, 201);
   });
 
-  router.get("/", (c) => {
+  router.get("/", async (c) => {
     const userId = c.get("userId");
-    const items = files.listForUser(userId).map(toPublicFile);
+    const items = (await files.listForUser(userId)).map(toPublicFile);
     return c.json({ files: items });
   });
 
-  router.get("/:fileId", (c) => {
+  router.get("/:fileId", async (c) => {
     const userId = c.get("userId");
-    const file = files.getOwnedFile(c.req.param("fileId"), userId);
+    const file = await files.getOwnedFile(c.req.param("fileId"), userId);
     return c.json({ file: toPublicFile(file) });
   });
 
@@ -77,7 +77,7 @@ export function createFilesRouter(files: FileService) {
       );
     }
 
-    const result = files.createSignedLink(
+    const result = await files.createSignedLink(
       c.req.param("fileId"),
       userId,
       parsed.data.ttlSeconds,
@@ -88,21 +88,37 @@ export function createFilesRouter(files: FileService) {
       downloadUrl: result.downloadUrl,
       expiresAt: result.expiresAt,
       ttlSeconds: result.ttlSeconds,
-      auditEventId: result.auditEventId,
+      signedLinkId: result.signedLinkId,
     });
   });
 
-  router.get("/:fileId/audit", (c) => {
+  router.get("/:fileId/links", async (c) => {
     const userId = c.get("userId");
-    const events = files.listAuditEvents(c.req.param("fileId"), userId).map((event) => ({
-      id: event.id,
-      fileId: event.file_id,
-      userId: event.user_id,
-      eventType: event.event_type,
-      ttlSeconds: event.ttl_seconds,
-      expiresAt: event.expires_at,
-      createdAt: event.created_at,
-    }));
+    const links = (await files.listSignedLinks(c.req.param("fileId"), userId)).map(
+      toPublicSignedLink,
+    );
+    return c.json({ links });
+  });
+
+  router.post("/:fileId/links/:linkId/revoke", async (c) => {
+    const userId = c.get("userId");
+    await files.revokeSignedLink(c.req.param("fileId"), c.req.param("linkId"), userId);
+    return c.json({ revoked: true });
+  });
+
+  router.get("/:fileId/audit", async (c) => {
+    const userId = c.get("userId");
+    const events = (await files.listAuditEvents(c.req.param("fileId"), userId)).map(
+      (event) => ({
+        id: event.id,
+        fileId: event.file_id,
+        userId: event.user_id,
+        eventType: event.event_type,
+        ttlSeconds: event.ttl_seconds,
+        expiresAt: event.expires_at,
+        createdAt: event.created_at,
+      }),
+    );
     return c.json({ events });
   });
 

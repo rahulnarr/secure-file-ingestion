@@ -13,44 +13,68 @@ flowchart TD
     Upload["POST /files"]
     Meta["GET /files<br/>GET /files/:id"]
     Sign["POST /files/:id/sign"]
+    Links["GET /files/:id/links<br/>POST /files/:id/links/:linkId/revoke"]
     Audit["GET /files/:id/audit"]
     Download["GET /download?fileId&expires&sig"]
-    Signer[HMAC-SHA256 signer<br/>shared SIGNING_SECRET]
-    Guard[Signature + expiry validator]
+    Signer[HMAC-SHA256 signer<br/>fileId + TTL -> signature<br/>shared SIGNING_SECRET]
+    Guard[Signature + expiry validator<br/>stateless, no DB read]
   end
 
-  subgraph storage [Local persistence]
-    FS[(Non-public upload directory)]
-    DB[(SQLite: files + audit_events)]
+  subgraph storage [Persistence]
+    FS[(Non-public local uploads directory<br/>file bytes)]
+    PG[(PostgreSQL<br/>files · signed_links · audit_events)]
   end
 
   Owner --> Upload
   Upload --> FS
-  Upload --> DB
+  Upload --> PG
 
   Owner --> Meta
-  Meta --> DB
+  Meta --> PG
 
   Owner --> Sign
-  Sign --> DB
   Sign --> Signer
-  Sign -->|audit: signed_link_generated| DB
+  Sign -->|persist signature, TTL, expiry| PG
+  Sign -->|audit: signed_link_generated| PG
   Sign -->|signed URL| Owner
+
+  Owner --> Links
+  Links --> PG
 
   Owner -->|share URL| Recipient
   Recipient --> Download
   Download --> Guard
+  Guard -->|1. crypto valid?| PG
+  PG -->|2. exists & not revoked?| Guard
   Guard -->|valid| FS
-  Guard -->|invalid or expired| Recipient
+  Guard -->|invalid, expired, or revoked| Recipient
   FS -->|file bytes| Recipient
+  Download -->|audit: downloaded / rejected| PG
 
   Owner --> Audit
-  Audit --> DB
+  Audit --> PG
 ```
 
 ## Lifecycle notes
 
-1. **Upload** — Multipart bytes land only under the configured non-public `UPLOAD_DIR`. Metadata (owner, filename, size, content type, path) is written to SQLite.
-2. **Sign** — Owners request a TTL. The service HMAC-signs `fileId.expiresAt` with `SIGNING_SECRET` and records an audit event. No server-side token store is required, so links remain valid across restarts.
-3. **Download** — Public endpoint recomputes the HMAC, checks expiry with a timing-safe compare, then streams the private blob if valid.
-4. **Metadata / audit** — Owners can list files and inspect signed-link generation history for a given file.
+1. **Upload** — Multipart bytes land only under the configured non-public `UPLOAD_DIR` on local disk. Metadata (owner, filename, size, content type, path) is written to the `files` table in Postgres.
+2. **Sign** — Owner requests a TTL for a `fileId`. The service derives an HMAC-SHA256 signature over `fileId.expiresAt` using `SIGNING_SECRET`, then persists the signature, TTL, and expiry in the `signed_links` table and records a `signed_link_generated` audit event. Because the signature is a pure function of `(fileId, expiresAt, secret)`, it can always be recomputed and re-verified even if the process restarts.
+3. **Download** — Public endpoint runs two checks in order:
+   - **Stateless crypto check**: recompute the HMAC and check expiry — rejects tampered or expired links instantly without a database round trip.
+   - **Postgres check**: confirm a matching `signed_links` row exists and `revoked_at IS NULL` — this is what makes revocation possible and confirms the link was actually issued by this service (not just well-formed).
+   Every attempt (success or rejection) writes an audit event.
+4. **Link management** — Owners can list all signed links ever generated for a file (`GET /files/:id/links`) with status (`active`/`revoked`) and revoke any active link before its natural expiry (`POST /files/:id/links/:linkId/revoke`).
+5. **Audit** — `GET /files/:id/audit` returns the full event history: generation, successful downloads, rejected downloads, and revocations.
+
+## Why Postgres instead of only stateless HMAC verification
+
+The signature alone is enough to prove a link *could* have come from this service, but storing the generated link in Postgres adds real product value beyond cryptographic proof:
+
+- **Revocation** — an owner can invalidate a leaked link immediately, without waiting for TTL expiry or rotating the shared secret (which would invalidate every other outstanding link too).
+- **Auditability** — "list every link ever generated for this file" and "list every download attempt" are only possible with a persisted record.
+- **Restart safety is preserved** — Postgres, like the HMAC secret, is durable across process restarts, so this doesn't reintroduce the in-memory-state problem the signing scheme was designed to avoid.
+
+## Deployment note (DigitalOcean)
+
+- File bytes (`UPLOAD_DIR`) stay on local disk — this fits a single **Droplet** with a persistent volume. It intentionally would **not** survive on App Platform's ephemeral filesystem or a multi-instance deployment without moving blobs to DO Spaces.
+- Metadata, signed links, and audit events live in **Postgres** — this can be a Droplet-hosted instance for the exercise, or a DigitalOcean **Managed PostgreSQL** cluster in production, without any application code changes (just `DATABASE_URL`).

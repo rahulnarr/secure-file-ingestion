@@ -7,11 +7,13 @@ import { HttpError } from "../services/files.js";
 export function createDownloadRouter(files: FileService, config: AppConfig) {
   const router = new Hono();
 
-  router.get("/", (c) => {
+  router.get("/", async (c) => {
     const fileId = c.req.query("fileId") ?? "";
     const expires = c.req.query("expires") ?? "";
     const signature = c.req.query("sig") ?? "";
 
+    // Step 1: stateless cryptographic check — rejects tampered or expired
+    // links instantly without touching Postgres.
     const verification = verifySignedDownload({
       secret: config.SIGNING_SECRET,
       fileId,
@@ -23,7 +25,12 @@ export function createDownloadRouter(files: FileService, config: AppConfig) {
       throw new HttpError(403, verification.reason, "INVALID_SIGNED_URL");
     }
 
-    const file = files.getById(verification.claims.fileId);
+    // Step 2: confirm the link was actually issued by this service and has
+    // not been revoked, and record the download attempt in the audit trail.
+    const { file } = await files.consumeSignedLink(
+      verification.claims.fileId,
+      signature,
+    );
     const bytes = files.readFileBytes(file);
 
     return new Response(new Uint8Array(bytes), {

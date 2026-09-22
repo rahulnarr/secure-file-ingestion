@@ -11,13 +11,15 @@ const envSchema = z.object({
     .default("dev-only-signing-secret-change-me"),
   DATA_DIR: z.string().default("./data"),
   UPLOAD_DIR: z.string().default("./data/uploads"),
-  DATABASE_PATH: z.string().default("./data/files.db"),
+  DATABASE_URL: z
+    .string()
+    .min(1, "DATABASE_URL is required, e.g. postgres://user:pass@host:5432/db")
+    .default("postgres://postgres:postgres@127.0.0.1:5432/signed_file_api"),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {
   uploadDirAbsolute: string;
-  databasePathAbsolute: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -25,6 +27,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     ...parsed,
     uploadDirAbsolute: path.resolve(parsed.UPLOAD_DIR),
-    databasePathAbsolute: path.resolve(parsed.DATABASE_PATH),
   };
 }
