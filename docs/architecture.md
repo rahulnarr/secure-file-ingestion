@@ -85,6 +85,31 @@ Every custom exception — whatever layer it's thrown from — shares one base, 
 
 Retrying happens once, generically, at the repository/storage boundary — not scattered through service code — via a `Proxy` (`makeResilient`) that `container.ts` wraps around every `Pg*Repository` and the `BlobStorage`. This is the boundary where "client-to-service call during file creation and storage" (writing the blob, inserting the `files` row) and "persisting to the DB" (every other repository call) actually happen, so it covers both cases the same way without each service needing its own retry logic.
 
+## Metrics & configurability
+
+### What's built
+
+**Metrics** (`src/infrastructure/metrics/metrics.ts`, `prom-client`): a single `Registry`, exposed as standard Prometheus text at `GET /metrics`, with four application-specific instruments layered on top of Node's default process metrics:
+
+| Metric | Labels | Recorded from |
+|---|---|---|
+| `http_requests_total` / `http_request_duration_seconds` | `method`, `route` (pattern, not literal path), `status_code` | `common/middleware/metrics-middleware.ts`, wrapping every request |
+| `service_errors_total` | `layer` (`domain`/`database`/`storage`/`unknown`), `code`, `retryable` | `error-handler.ts`, the one place every `AppError` (and everything else) passes through |
+| `retry_attempts_total` / `retry_exhausted_total` | `operation` (e.g. `FileRepository.insert`) | `with-retry.ts`, alongside the existing structured log lines |
+
+The deliberate choice here was **Prometheus text format, not a vendor SDK call**. Nothing in the application code knows or cares whether the eventual backend is self-hosted Prometheus, the Datadog Agent's OpenMetrics/Prometheus check, Grafana Cloud, or anything else that can scrape an HTTP endpoint — migrating later is a scrape-config change on the infrastructure side, not an application redeploy.
+
+**API documentation**: every endpoint is described in a hand-authored OpenAPI 3.0 document (`src/docs/openapi.ts`), served raw at `GET /openapi.json` and as an interactive Swagger UI at `GET /docs` — request/response schemas, required headers, and status codes for the full surface, always in sync with the code because it's part of the same PR review as any route change.
+
+**Configurability** (`src/config/env.ts`): every environment-driven or otherwise-tunable value — server binding, signing secret, TTL ceiling, upload/batch limits, log level, retry policy (attempts/delays/elapsed budget), and the storage backend selector — is defined once, zod-validated, and typed. Nothing else in the codebase reads `process.env` directly, and `STORAGE_BACKEND=local|spaces` is itself a configurability example: swapping deployment targets (Droplet vs. App Platform) is an environment variable, not a code change.
+
+### Future plans
+
+- **Wire a real scrape target.** `/metrics` exists and is correct today, but nothing is actually pulling from it yet. The next step is pointing either a self-hosted Prometheus + Grafana stack or the Datadog Agent's Prometheus check at the Droplet (or each App Platform instance), then building the first dashboard and alert rule directly from `service_errors_total{layer="database"}` — the metric this whole design was built to make possible.
+- **Alerting and ticketing on the signals already emitted.** Once scraped, the natural alerts are: error-rate-by-layer above a threshold over N minutes (paging), `retry_exhausted_total` incrementing at all (early warning of a degrading dependency before it becomes a full outage), and p99 `http_request_duration_seconds` regressions per route. Routing those into a ticketing system (PagerDuty, Opsgenie, or a Datadog monitor → Jira/Linear integration) is the next concrete step once there's a real on-call rotation to route them to.
+- **Request-scoped correlation IDs.** Logs and metrics are correlated by route and error code today, but not by an individual request — adding a generated `X-Request-Id` (or honoring an inbound one) threaded through the logger's child-logger context would make "find every log line for this one failed request" possible without grepping by timestamp.
+- **Dynamic config reload for a few specific keys.** Everything in `config/env.ts` currently requires a restart to change. Most of it should — a signing secret or a storage backend change deserves a deliberate redeploy — but a couple (log level, retry policy tuning) are the kind of thing an on-call engineer might want to adjust live during an incident without a full deploy cycle.
+
 ## Why Postgres instead of only stateless HMAC verification
 
 The signature alone is enough to prove a link *could* have come from this service, but storing the generated link in Postgres adds real product value beyond cryptographic proof:

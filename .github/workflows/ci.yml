@@ -1,8 +1,15 @@
 name: CI
 
 on:
+  # main is deliberately excluded here: deploy.yml (triggered on push to
+  # main) already runs this exact suite via workflow_call as its first
+  # job, gating verify-droplet/verify-database/deploy behind it. Also
+  # triggering it directly on push to main would run every test twice and
+  # show two separate, confusingly-overlapping workflow runs for the same
+  # commit — this way there's exactly one pipeline for main, and CI still
+  # gives fast feedback on every other branch and PR.
   push:
-    branches: [main, "cursor/**"]
+    branches: ["cursor/**"]
   pull_request:
   workflow_call: # allows deploy.yml to depend on this workflow passing first
 
