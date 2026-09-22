@@ -1,6 +1,13 @@
 import type { Pool } from "pg";
-import type { AppConfig } from "./config/env.js";
+import { retryPolicyFromConfig, type AppConfig } from "./config/env.js";
 import { UrlSigner } from "./infrastructure/crypto/url-signer.js";
+import { createLogger, type Logger } from "./infrastructure/logging/logger.js";
+import {
+  isRetryableDatabaseError,
+  isRetryableStorageError,
+} from "./infrastructure/resilience/error-classifiers.js";
+import { wrapDatabaseError, wrapStorageError } from "./infrastructure/resilience/error-wrappers.js";
+import { makeResilient } from "./infrastructure/resilience/resilient-proxy.js";
 import type { BlobStorage } from "./infrastructure/storage/blob-storage.js";
 import { LocalBlobStorage } from "./infrastructure/storage/local-blob-storage.js";
 import { ListAuditEventsController } from "./modules/audit/controllers/list-audit-events.controller.js";
@@ -35,26 +42,63 @@ import { ListSignedLinksService } from "./modules/signed-links/services/list-sig
 import { RedeemSignedLinkService } from "./modules/signed-links/services/redeem-signed-link.service.js";
 import { RevokeSignedLinkService } from "./modules/signed-links/services/revoke-signed-link.service.js";
 
-/** Composition root: the only place that knows concrete implementations. */
+/**
+ * Composition root: the only place that knows concrete implementations.
+ * Every repository and the blob store are wrapped with the retry policy
+ * here — services and controllers only ever see the plain interfaces, so
+ * this is also the only place aware that retries happen at all.
+ */
 export function buildContainer(
   config: AppConfig,
   pool: Pool,
   storage: BlobStorage = new LocalBlobStorage(config.uploadDirAbsolute),
+  logger: Logger = createLogger(config.LOG_LEVEL),
 ) {
   const signer = new UrlSigner(config.SIGNING_SECRET, config.BASE_URL);
+  const retryPolicy = retryPolicyFromConfig(config);
 
-  const fileRepository = new PgFileRepository(pool);
-  const signedLinkRepository = new PgSignedLinkRepository(pool);
-  const auditRepository = new PgAuditRepository(pool);
+  const fileRepository = makeResilient(
+    new PgFileRepository(pool),
+    retryPolicy,
+    isRetryableDatabaseError,
+    wrapDatabaseError,
+    logger,
+    "FileRepository",
+  );
+  const signedLinkRepository = makeResilient(
+    new PgSignedLinkRepository(pool),
+    retryPolicy,
+    isRetryableDatabaseError,
+    wrapDatabaseError,
+    logger,
+    "SignedLinkRepository",
+  );
+  const auditRepository = makeResilient(
+    new PgAuditRepository(pool),
+    retryPolicy,
+    isRetryableDatabaseError,
+    wrapDatabaseError,
+    logger,
+    "AuditRepository",
+  );
+  const resilientStorage = makeResilient(
+    storage,
+    retryPolicy,
+    isRetryableStorageError,
+    wrapStorageError,
+    logger,
+    "BlobStorage",
+  );
 
   const recordAudit = new RecordAuditEventService(auditRepository);
   const fileAccess = new FileAccessService(fileRepository);
 
-  const uploadFile = new UploadFileService(fileRepository, storage, config.MAX_UPLOAD_BYTES);
-  const deleteFile = new DeleteFileService(fileAccess, fileRepository, storage, recordAudit);
+  const uploadFile = new UploadFileService(fileRepository, resilientStorage, config.MAX_UPLOAD_BYTES);
+  const deleteFile = new DeleteFileService(fileAccess, fileRepository, resilientStorage, recordAudit);
   const redeemSignedLink = new RedeemSignedLinkService(signedLinkRepository, recordAudit);
 
   return {
+    logger,
     health: {
       health: new HealthController(config.MAX_UPLOAD_BYTES),
     },
@@ -75,7 +119,14 @@ export function buildContainer(
     },
     signedLinks: {
       create: new CreateSignedLinkController(
-        new CreateSignedLinkService(fileAccess, signer, signedLinkRepository, recordAudit),
+        new CreateSignedLinkService(
+          fileAccess,
+          signer,
+          signedLinkRepository,
+          recordAudit,
+          config.MAX_TTL_SECONDS,
+        ),
+        config.MAX_TTL_SECONDS,
       ),
       list: new ListSignedLinksController(
         new ListSignedLinksService(fileAccess, signedLinkRepository),
@@ -91,7 +142,7 @@ export function buildContainer(
     },
     downloads: {
       download: new DownloadFileController(
-        new DownloadFileService(signer, fileAccess, redeemSignedLink, storage),
+        new DownloadFileService(signer, fileAccess, redeemSignedLink, resilientStorage),
       ),
     },
   };

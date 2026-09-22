@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ValidationError } from "../../../common/errors/domain-errors.js";
 import type { RecordAuditEventService } from "../../audit/services/record-audit-event.service.js";
 import type { FileRepository } from "../file.repository.js";
 import type { FileRecord } from "../file.types.js";
@@ -19,11 +19,11 @@ export class UpdateFileService {
     const file = await this.access.getOwned(fileId, userId);
 
     if (updates.filename === undefined) {
-      throw new HttpError(400, "No updatable fields provided", "NO_UPDATES");
+      throw new ValidationError("No updatable fields provided", "NO_UPDATES");
     }
     const filename = updates.filename.trim();
     if (!filename) {
-      throw new HttpError(400, "filename cannot be empty", "INVALID_FILENAME");
+      throw new ValidationError("filename cannot be empty", "INVALID_FILENAME");
     }
 
     const updated = await this.files.updateFilename(file.id, filename);

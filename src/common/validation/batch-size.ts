@@ -1,10 +1,10 @@
-import { HttpError } from "../errors/http-error.js";
+import { ValidationError } from "../errors/domain-errors.js";
 
 export function assertBatchSize(count: number, max: number, emptyMessage: string): void {
   if (count === 0) {
-    throw new HttpError(400, emptyMessage, "EMPTY_BATCH");
+    throw new ValidationError(emptyMessage, "EMPTY_BATCH", { count, max });
   }
   if (count > max) {
-    throw new HttpError(400, `Batch exceeds max of ${max} files`, "BATCH_TOO_LARGE");
+    throw new ValidationError(`Batch exceeds max of ${max} files`, "BATCH_TOO_LARGE", { count, max });
   }
 }

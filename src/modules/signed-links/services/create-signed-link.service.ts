@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ValidationError } from "../../../common/errors/domain-errors.js";
 import type { UrlSigner } from "../../../infrastructure/crypto/url-signer.js";
 import type { RecordAuditEventService } from "../../audit/services/record-audit-event.service.js";
 import type { FileAccessService } from "../../files/services/file-access.service.js";
 import type { SignedLinkRepository } from "../signed-link.repository.js";
-import { MAX_TTL_SECONDS } from "../signed-link.schemas.js";
 
 export type CreatedSignedLink = {
   signedLinkId: string;
@@ -24,13 +23,13 @@ export class CreateSignedLinkService {
     private readonly signer: UrlSigner,
     private readonly links: SignedLinkRepository,
     private readonly recordAudit: RecordAuditEventService,
+    private readonly maxTtlSeconds: number,
   ) {}
 
   async execute(fileId: string, userId: string, ttlSeconds: number): Promise<CreatedSignedLink> {
-    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) {
-      throw new HttpError(
-        400,
-        `ttlSeconds must be an integer between 1 and ${MAX_TTL_SECONDS}`,
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > this.maxTtlSeconds) {
+      throw new ValidationError(
+        `ttlSeconds must be an integer between 1 and ${this.maxTtlSeconds}`,
         "INVALID_TTL",
       );
     }

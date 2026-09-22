@@ -42,7 +42,7 @@ describe("signed link lifecycle (services only, no HTTP or database)", () => {
     const recordAudit = new RecordAuditEventService(audit);
 
     uploadFile = new UploadFileService(files, storage, 1024);
-    createLink = new CreateSignedLinkService(access, signer, links, recordAudit);
+    createLink = new CreateSignedLinkService(access, signer, links, recordAudit, 86_400);
     revokeLink = new RevokeSignedLinkService(access, links, recordAudit);
     download = new DownloadFileService(
       signer,
@@ -74,7 +74,7 @@ describe("signed link lifecycle (services only, no HTTP or database)", () => {
   it("rejects a tampered signature before any repository lookup", async () => {
     await expect(
       download.execute({ fileId: "x", expires: "9999999999", signature: "deadbeef" }),
-    ).rejects.toMatchObject({ status: 403, code: "INVALID_SIGNED_URL" });
+    ).rejects.toMatchObject({ statusCode: 403, code: "INVALID_SIGNED_URL" });
     expect(audit.events).toHaveLength(0);
   });
 
@@ -102,7 +102,7 @@ describe("signed link lifecycle (services only, no HTTP or database)", () => {
     storage.blobs.clear();
 
     await expect(download.execute(queryOf(link.downloadUrl))).rejects.toMatchObject({
-      status: 410,
+      statusCode: 410,
       code: "BLOB_MISSING",
     });
   });

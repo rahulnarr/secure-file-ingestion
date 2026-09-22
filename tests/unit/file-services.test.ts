@@ -48,7 +48,7 @@ describe("file services", () => {
       });
       await expect(
         uploadFile.execute("alice", upload("big.txt", "01234567890")),
-      ).rejects.toMatchObject({ status: 413, code: "FILE_TOO_LARGE" });
+      ).rejects.toMatchObject({ statusCode: 413, code: "FILE_TOO_LARGE" });
       expect(storage.blobs.size).toBe(0);
     });
 
@@ -95,7 +95,7 @@ describe("file services", () => {
     it("refuses to delete another user's file", async () => {
       const record = await uploadFile.execute("alice", upload("a.txt", "hello"));
       await expect(deleteFile.execute(record.id, "mallory")).rejects.toMatchObject({
-        status: 403,
+        statusCode: 403,
       });
       expect(files.rows.has(record.id)).toBe(true);
     });

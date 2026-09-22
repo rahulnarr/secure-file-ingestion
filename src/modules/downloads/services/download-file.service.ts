@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ForbiddenError, GoneError } from "../../../common/errors/domain-errors.js";
 import type { UrlSigner } from "../../../infrastructure/crypto/url-signer.js";
 import type { BlobStorage } from "../../../infrastructure/storage/blob-storage.js";
 import type { FileRecord } from "../../files/file.types.js";
@@ -27,14 +27,14 @@ export class DownloadFileService {
   async execute(request: DownloadRequest): Promise<{ file: FileRecord; bytes: Buffer }> {
     const verification = this.signer.verify(request);
     if (!verification.ok) {
-      throw new HttpError(403, verification.reason, "INVALID_SIGNED_URL");
+      throw new ForbiddenError(verification.reason, "INVALID_SIGNED_URL");
     }
 
     const file = await this.access.getById(verification.fileId);
     await this.redeemSignedLink.execute(file.id, request.signature);
 
     if (!(await this.storage.exists(file.storage_path))) {
-      throw new HttpError(410, "Stored file blob is missing", "BLOB_MISSING");
+      throw new GoneError("Stored file blob is missing", "BLOB_MISSING", { fileId: file.id });
     }
 
     return { file, bytes: await this.storage.read(file.storage_path) };

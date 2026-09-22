@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { NotFoundError } from "../../../common/errors/domain-errors.js";
 import { assertUuid } from "../../../common/validation/uuid.js";
 import type { RecordAuditEventService } from "../../audit/services/record-audit-event.service.js";
 import type { FileAccessService } from "../../files/services/file-access.service.js";
@@ -16,10 +16,10 @@ export class RevokeSignedLinkService {
     assertUuid(linkId, "linkId");
 
     if (!(await this.links.revoke(linkId, file.id))) {
-      throw new HttpError(
-        404,
+      throw new NotFoundError(
         "Signed link not found or already revoked",
         "SIGNED_LINK_NOT_FOUND",
+        { fileId, linkId },
       );
     }
 

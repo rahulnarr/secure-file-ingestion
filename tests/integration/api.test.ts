@@ -28,6 +28,7 @@ describe("API integration", () => {
       UPLOAD_DIR: path.join(tempRoot, "uploads"),
       DATABASE_URL: TEST_DATABASE_URL,
       MAX_UPLOAD_BYTES: "1048576",
+      LOG_LEVEL: "silent",
     });
     pool = await connectDatabase(config.DATABASE_URL);
     await pool.query("TRUNCATE TABLE audit_events, signed_links, files RESTART IDENTITY CASCADE");

@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ForbiddenError, NotFoundError } from "../../../common/errors/domain-errors.js";
 import { assertUuid } from "../../../common/validation/uuid.js";
 import type { FileRepository } from "../file.repository.js";
 import type { FileRecord } from "../file.types.js";
@@ -11,7 +11,7 @@ export class FileAccessService {
     assertUuid(fileId, "fileId");
     const file = await this.files.findById(fileId);
     if (!file) {
-      throw new HttpError(404, "File not found", "FILE_NOT_FOUND");
+      throw new NotFoundError("File not found", "FILE_NOT_FOUND", { fileId });
     }
     return file;
   }
@@ -19,7 +19,7 @@ export class FileAccessService {
   async getOwned(fileId: string, userId: string): Promise<FileRecord> {
     const file = await this.getById(fileId);
     if (file.user_id !== userId) {
-      throw new HttpError(403, "You do not own this file", "FORBIDDEN");
+      throw new ForbiddenError("You do not own this file", "FORBIDDEN", { fileId, userId });
     }
     return file;
   }

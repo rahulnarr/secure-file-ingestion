@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { HttpError } from "../../../common/errors/http-error.js";
+import { PayloadTooLargeError, ValidationError } from "../../../common/errors/domain-errors.js";
 import type { BlobStorage } from "../../../infrastructure/storage/blob-storage.js";
 import type { FileRepository } from "../file.repository.js";
 import type { FileRecord, FileUpload } from "../file.types.js";
@@ -34,19 +34,21 @@ export class UploadFileService {
 
   private validate(userId: string, upload: FileUpload): void {
     if (!userId.trim()) {
-      throw new HttpError(400, "userId is required", "MISSING_USER");
+      throw new ValidationError("userId is required", "MISSING_USER");
     }
     if (!upload.filename.trim()) {
-      throw new HttpError(400, "filename is required", "MISSING_FILENAME");
+      throw new ValidationError("filename is required", "MISSING_FILENAME");
     }
     if (upload.data.byteLength === 0) {
-      throw new HttpError(400, "Empty files are not allowed", "EMPTY_FILE");
+      throw new ValidationError("Empty files are not allowed", "EMPTY_FILE", {
+        filename: upload.filename,
+      });
     }
     if (upload.data.byteLength > this.maxUploadBytes) {
-      throw new HttpError(
-        413,
+      throw new PayloadTooLargeError(
         `File exceeds max size of ${this.maxUploadBytes} bytes`,
         "FILE_TOO_LARGE",
+        { filename: upload.filename, sizeBytes: upload.data.byteLength, maxUploadBytes: this.maxUploadBytes },
       );
     }
   }

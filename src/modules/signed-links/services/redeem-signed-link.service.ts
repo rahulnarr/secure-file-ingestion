@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ForbiddenError } from "../../../common/errors/domain-errors.js";
 import type { RecordAuditEventService } from "../../audit/services/record-audit-event.service.js";
 import type { SignedLinkRepository } from "../signed-link.repository.js";
 import type { SignedLinkRecord } from "../signed-link.types.js";
@@ -23,7 +23,9 @@ export class RedeemSignedLinkService {
         eventType: "signed_link_download_rejected",
         metadata: { reason: "UNKNOWN_LINK" },
       });
-      throw new HttpError(403, "Signed link was not issued by this service", "UNKNOWN_LINK");
+      throw new ForbiddenError("Signed link was not issued by this service", "UNKNOWN_LINK", {
+        fileId,
+      });
     }
 
     if (link.revoked_at) {
@@ -35,7 +37,10 @@ export class RedeemSignedLinkService {
         expiresAt: link.expires_at,
         metadata: { reason: "LINK_REVOKED", signedLinkId: link.id },
       });
-      throw new HttpError(403, "Signed link has been revoked", "LINK_REVOKED");
+      throw new ForbiddenError("Signed link has been revoked", "LINK_REVOKED", {
+        fileId,
+        signedLinkId: link.id,
+      });
     }
 
     await this.recordAudit.execute({

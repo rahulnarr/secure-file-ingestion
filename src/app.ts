@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { errorHandler, notFoundHandler } from "./common/errors/error-handler.js";
+import { createErrorHandler, createNotFoundHandler } from "./common/errors/error-handler.js";
 import { requireUser } from "./common/middleware/require-user.js";
 import type { AppEnv } from "./common/types/app-env.js";
 import type { Container } from "./container.js";
@@ -21,8 +21,8 @@ export function createApp(container: Container) {
   app.route("/files", createAuditRoutes(container.audit));
   app.route("/download", createDownloadsRoutes(container.downloads));
 
-  app.onError(errorHandler);
-  app.notFound(notFoundHandler);
+  app.onError(createErrorHandler(container.logger));
+  app.notFound(createNotFoundHandler(container.logger));
 
   return app;
 }

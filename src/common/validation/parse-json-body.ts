@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import type { z } from "zod";
-import { HttpError } from "../errors/http-error.js";
+import { ValidationError } from "../errors/domain-errors.js";
 
 export async function parseJsonBody<S extends z.ZodType>(
   c: Context,
@@ -11,12 +11,14 @@ export async function parseJsonBody<S extends z.ZodType>(
   try {
     payload = await c.req.json();
   } catch {
-    throw new HttpError(400, "JSON body required", "INVALID_JSON");
+    throw new ValidationError("JSON body required", "INVALID_JSON");
   }
 
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
-    throw new HttpError(400, onInvalid.message, onInvalid.code);
+    throw new ValidationError(onInvalid.message, onInvalid.code, {
+      issues: parsed.error.issues,
+    });
   }
   return parsed.data;
 }

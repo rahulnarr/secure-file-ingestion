@@ -101,6 +101,33 @@ flowchart LR
 - **Repositories** own the SQL for a single table.
 - `container.ts` is the composition root. It binds each interface to its implementation (`Pg*Repository`, `LocalBlobStorage`), so a different backend such as DigitalOcean Spaces means adding an implementation without editing any service.
 
+## Exceptions, logging, and retries
+
+```mermaid
+flowchart TD
+  Controller[Any controller] --> Service[Any service]
+  Service -->|calls a method on| RepoIface[FileRepository / SignedLinkRepository /<br/>AuditRepository / BlobStorage interface]
+  RepoIface -.->|container.ts wraps the real impl with| Proxy[makeResilient Proxy]
+  Proxy --> Retry[withRetry: exponential backoff + jitter,<br/>bounded by maxAttempts AND maxElapsedMs]
+  Retry -->|calls the real method| Impl[Pg*Repository / LocalBlobStorage]
+  Impl -->|throws raw pg/fs error| Retry
+  Retry -->|isRetryableDatabaseError /<br/>isRetryableStorageError says yes,<br/>budget remains| Retry
+  Retry -->|non-retryable, or budget exhausted| Wrap[wrapDatabaseError / wrapStorageError]
+  Wrap -->|permanent failure| DBErr[DatabaseError / StorageError<br/>isRetryable=false]
+  Wrap -->|was transient, ran out of budget| Exhausted[RetryExhaustedError]
+  DBErr --> Bubble[AppError propagates up through<br/>service -> controller -> Hono]
+  Exhausted --> Bubble
+  Service -->|throws directly for business rules| Domain[ValidationError / NotFoundError /<br/>ForbiddenError / UnauthorizedError]
+  Domain --> Bubble
+  Bubble --> Handler[Global error handler]
+  Handler -->|logs full AppError metadata| Logger[(pino structured logger)]
+  Handler -->|error, code, correct HTTP status| Client[HTTP response]
+```
+
+Every custom exception — whatever layer it's thrown from — shares one base, `AppError`: a `code`, an HTTP `statusCode`, an `isRetryable` flag, structured `context`, and (via `Error.cause`) the original low-level failure. That uniformity is what lets the single global error handler log every failure the same way and always return a consistent `{ error, code }` body, regardless of whether the root cause was a validation rule, an ownership check, a dropped Postgres connection, or a busy filesystem handle.
+
+Retrying happens once, generically, at the repository/storage boundary — not scattered through service code — via a `Proxy` (`makeResilient`) that `container.ts` wraps around every `Pg*Repository` and the `BlobStorage`. This is the boundary where "client-to-service call during file creation and storage" (writing the blob, inserting the `files` row) and "persisting to the DB" (every other repository call) actually happen, so it covers both cases the same way without each service needing its own retry logic.
+
 ## Why Postgres instead of only stateless HMAC verification
 
 The signature alone is enough to prove a link *could* have come from this service, but storing the generated link in Postgres adds real product value beyond cryptographic proof:

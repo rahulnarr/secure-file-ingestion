@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ValidationError } from "../../../common/errors/domain-errors.js";
 import type { AppEnv } from "../../../common/types/app-env.js";
 import { toFileUpload, toPublicFile } from "../file.mapper.js";
 import type { BatchUploadFilesService } from "../services/batch-upload-files.service.js";
@@ -16,7 +16,7 @@ export class BatchUploadFilesController {
     );
 
     if (fields.length === 0) {
-      throw new HttpError(400, "multipart field 'files' is required", "MISSING_FILES");
+      throw new ValidationError("multipart field 'files' is required", "MISSING_FILES");
     }
 
     const uploads = await Promise.all(fields.map(toFileUpload));

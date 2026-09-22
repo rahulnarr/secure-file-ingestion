@@ -1,7 +1,8 @@
 import { z } from "zod";
 
-export const MAX_TTL_SECONDS = 86_400;
-
-export const createSignedLinkSchema = z.object({
-  ttlSeconds: z.coerce.number().int().min(1).max(MAX_TTL_SECONDS),
-});
+/** maxTtlSeconds comes from AppConfig (MAX_TTL_SECONDS) — see src/config/env.ts. */
+export function createSignedLinkSchema(maxTtlSeconds: number) {
+  return z.object({
+    ttlSeconds: z.coerce.number().int().min(1).max(maxTtlSeconds),
+  });
+}

@@ -1,4 +1,4 @@
-import { HttpError } from "../../../common/errors/http-error.js";
+import { ForbiddenError, NotFoundError } from "../../../common/errors/domain-errors.js";
 import { assertUuid } from "../../../common/validation/uuid.js";
 import type { FileRepository } from "../../files/file.repository.js";
 import type { AuditRepository } from "../audit.repository.js";
@@ -21,10 +21,10 @@ export class ListAuditEventsService {
     const file = await this.files.findById(fileId);
     if (file) {
       if (file.user_id !== userId) {
-        throw new HttpError(403, "You do not own this file", "FORBIDDEN");
+        throw new ForbiddenError("You do not own this file", "FORBIDDEN", { fileId, userId });
       }
     } else if (!(await this.audit.existsForFileAndUser(fileId, userId))) {
-      throw new HttpError(404, "File not found", "FILE_NOT_FOUND");
+      throw new NotFoundError("File not found", "FILE_NOT_FOUND", { fileId });
     }
 
     return this.audit.listByFile(fileId);
