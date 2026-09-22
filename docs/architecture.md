@@ -10,8 +10,9 @@ flowchart TD
   end
 
   subgraph api [signed-file-api]
-    Upload["POST /files"]
-    Meta["GET /files<br/>GET /files/:id"]
+    Upload["POST /files<br/>POST /files/batch"]
+    Meta["GET /files<br/>GET /files/:id<br/>PATCH /files/:id"]
+    Delete["DELETE /files/:id<br/>POST /files/batch-delete"]
     Sign["POST /files/:id/sign"]
     Links["GET /files/:id/links<br/>POST /files/:id/links/:linkId/revoke"]
     Audit["GET /files/:id/audit"]
@@ -31,6 +32,11 @@ flowchart TD
 
   Owner --> Meta
   Meta --> PG
+
+  Owner --> Delete
+  Delete -->|remove blob| FS
+  Delete -->|delete row + cascade signed_links| PG
+  Delete -->|audit: file_deleted<br/>survives the delete| PG
 
   Owner --> Sign
   Sign --> Signer
@@ -57,14 +63,15 @@ flowchart TD
 
 ## Lifecycle notes
 
-1. **Upload** — Multipart bytes land only under the configured non-public `UPLOAD_DIR` on local disk. Metadata (owner, filename, size, content type, path) is written to the `files` table in Postgres.
-2. **Sign** — Owner requests a TTL for a `fileId`. The service derives an HMAC-SHA256 signature over `fileId.expiresAt` using `SIGNING_SECRET`, then persists the signature, TTL, and expiry in the `signed_links` table and records a `signed_link_generated` audit event. Because the signature is a pure function of `(fileId, expiresAt, secret)`, it can always be recomputed and re-verified even if the process restarts.
-3. **Download** — Public endpoint runs two checks in order:
+1. **Upload** — Multipart bytes land only under the configured non-public `UPLOAD_DIR` on local disk. Metadata (owner, filename, size, content type, path) is written to the `files` table in Postgres. `POST /files/batch` does the same for multiple files in one request, uploading each independently so one bad file (empty, too large) doesn't fail the rest.
+2. **Metadata & lifecycle** — Owners can list (`GET /files`), fetch (`GET /files/:id`), rename (`PATCH /files/:id`), and delete (`DELETE /files/:id`, or `POST /files/batch-delete` for many) files scoped strictly to their `X-User-Id`. Delete removes the blob from disk and the `files` row (cascading its `signed_links`), but preserves a `file_deleted` audit event with a metadata snapshot of what was removed.
+3. **Sign** — Owner requests a TTL for a `fileId`. The service derives an HMAC-SHA256 signature over `fileId.expiresAt` using `SIGNING_SECRET`, then persists the signature, TTL, and expiry in the `signed_links` table and records a `signed_link_generated` audit event. Because the signature is a pure function of `(fileId, expiresAt, secret)`, it can always be recomputed and re-verified even if the process restarts.
+4. **Download** — Public endpoint runs two checks in order:
    - **Stateless crypto check**: recompute the HMAC and check expiry — rejects tampered or expired links instantly without a database round trip.
    - **Postgres check**: confirm a matching `signed_links` row exists and `revoked_at IS NULL` — this is what makes revocation possible and confirms the link was actually issued by this service (not just well-formed).
    Every attempt (success or rejection) writes an audit event.
-4. **Link management** — Owners can list all signed links ever generated for a file (`GET /files/:id/links`) with status (`active`/`revoked`) and revoke any active link before its natural expiry (`POST /files/:id/links/:linkId/revoke`).
-5. **Audit** — `GET /files/:id/audit` returns the full event history: generation, successful downloads, rejected downloads, and revocations.
+5. **Link management** — Owners can list all signed links ever generated for a file (`GET /files/:id/links`) with status (`active`/`revoked`) and revoke any active link before its natural expiry (`POST /files/:id/links/:linkId/revoke`).
+6. **Audit** — `GET /files/:id/audit` returns the full event history: generation, successful downloads, rejected downloads, revocations, renames, and deletes. Audit events have **no foreign key to `files`**, by design — an audit trail must remain queryable after the resource it describes is gone.
 
 ## Why Postgres instead of only stateless HMAC verification
 

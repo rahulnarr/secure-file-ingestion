@@ -162,6 +162,154 @@ export class FileService {
     };
   }
 
+  /**
+   * Uploads multiple files for a user in one call, isolating failures per
+   * file so one bad upload (e.g. empty file, too large) doesn't abort the
+   * rest of the batch.
+   */
+  async batchUpload(
+    userId: string,
+    inputs: Array<{ filename: string; contentType: string; data: Buffer }>,
+  ): Promise<{
+    uploaded: FileRecord[];
+    failed: Array<{ filename: string; error: string; code?: string }>;
+  }> {
+    if (inputs.length === 0) {
+      throw new HttpError(400, "At least one file is required", "EMPTY_BATCH");
+    }
+    if (inputs.length > this.config.MAX_BATCH_SIZE) {
+      throw new HttpError(
+        400,
+        `Batch exceeds max of ${this.config.MAX_BATCH_SIZE} files`,
+        "BATCH_TOO_LARGE",
+      );
+    }
+
+    const uploaded: FileRecord[] = [];
+    const failed: Array<{ filename: string; error: string; code?: string }> = [];
+
+    for (const input of inputs) {
+      try {
+        const record = await this.upload({ userId, ...input });
+        uploaded.push(record);
+      } catch (error) {
+        if (error instanceof HttpError) {
+          failed.push({ filename: input.filename, error: error.message, code: error.code });
+        } else {
+          failed.push({ filename: input.filename, error: "Upload failed" });
+        }
+      }
+    }
+
+    return { uploaded, failed };
+  }
+
+  /**
+   * Deletes multiple files owned by the caller in one call. Each id is
+   * isolated so one missing/forbidden id doesn't block the rest.
+   */
+  async batchDelete(
+    userId: string,
+    fileIds: string[],
+  ): Promise<{
+    deleted: string[];
+    failed: Array<{ fileId: string; error: string; code?: string }>;
+  }> {
+    if (fileIds.length === 0) {
+      throw new HttpError(400, "At least one fileId is required", "EMPTY_BATCH");
+    }
+    if (fileIds.length > this.config.MAX_BATCH_SIZE) {
+      throw new HttpError(
+        400,
+        `Batch exceeds max of ${this.config.MAX_BATCH_SIZE} files`,
+        "BATCH_TOO_LARGE",
+      );
+    }
+
+    const deleted: string[] = [];
+    const failed: Array<{ fileId: string; error: string; code?: string }> = [];
+
+    for (const fileId of fileIds) {
+      try {
+        await this.delete(fileId, userId);
+        deleted.push(fileId);
+      } catch (error) {
+        if (error instanceof HttpError) {
+          failed.push({ fileId, error: error.message, code: error.code });
+        } else {
+          failed.push({ fileId, error: "Delete failed" });
+        }
+      }
+    }
+
+    return { deleted, failed };
+  }
+
+  /**
+   * Deletes a single file owned by the caller: removes the blob from disk,
+   * removes the DB row (cascading its signed_links), and preserves a
+   * "file_deleted" audit event with a metadata snapshot of what was removed.
+   */
+  async delete(fileId: string, userId: string): Promise<void> {
+    const file = await this.getOwnedFile(fileId, userId);
+
+    await this.recordAuditEvent({
+      fileId: file.id,
+      userId,
+      eventType: "file_deleted",
+      ttlSeconds: null,
+      expiresAt: null,
+      metadata: {
+        filename: file.original_filename,
+        sizeBytes: Number(file.size_bytes),
+        contentType: file.content_type,
+      },
+    });
+
+    await this.db.query(`DELETE FROM files WHERE id = $1`, [file.id]);
+
+    if (fs.existsSync(file.storage_path)) {
+      fs.unlinkSync(file.storage_path);
+    }
+  }
+
+  /**
+   * Updates metadata (currently: filename) for a file owned by the caller.
+   */
+  async updateMetadata(
+    fileId: string,
+    userId: string,
+    updates: { filename?: string },
+  ): Promise<FileRecord> {
+    const file = await this.getOwnedFile(fileId, userId);
+
+    if (updates.filename === undefined) {
+      throw new HttpError(400, "No updatable fields provided", "NO_UPDATES");
+    }
+
+    const trimmed = updates.filename.trim();
+    if (!trimmed) {
+      throw new HttpError(400, "filename cannot be empty", "INVALID_FILENAME");
+    }
+
+    const result = await this.db.query<FileRecord>(
+      `UPDATE files SET original_filename = $1 WHERE id = $2
+       RETURNING id, user_id, original_filename, content_type, size_bytes, storage_path, created_at`,
+      [trimmed, file.id],
+    );
+
+    await this.recordAuditEvent({
+      fileId: file.id,
+      userId,
+      eventType: "file_renamed",
+      ttlSeconds: null,
+      expiresAt: null,
+      metadata: { previousFilename: file.original_filename, filename: trimmed },
+    });
+
+    return result.rows[0];
+  }
+
   async listSignedLinks(fileId: string, userId: string): Promise<SignedLinkRecord[]> {
     await this.getOwnedFile(fileId, userId);
     const result = await this.db.query<SignedLinkRecord>(
@@ -255,10 +403,35 @@ export class FileService {
     return { file, link };
   }
 
+  /**
+   * Audit events are intentionally readable even for a file that no longer
+   * exists (e.g. after deletion), so this checks ownership via any surviving
+   * audit record for that fileId + userId rather than requiring a live file.
+   */
   async listAuditEvents(fileId: string, userId: string): Promise<AuditEvent[]> {
-    await this.getOwnedFile(fileId, userId);
+    assertUuid(fileId, "fileId");
+
+    const stillExists = await this.db.query<{ user_id: string }>(
+      `SELECT user_id FROM files WHERE id = $1`,
+      [fileId],
+    );
+
+    if (stillExists.rows[0]) {
+      if (stillExists.rows[0].user_id !== userId) {
+        throw new HttpError(403, "You do not own this file", "FORBIDDEN");
+      }
+    } else {
+      const hasOwnAuditTrail = await this.db.query(
+        `SELECT 1 FROM audit_events WHERE file_id = $1 AND user_id = $2 LIMIT 1`,
+        [fileId, userId],
+      );
+      if (hasOwnAuditTrail.rowCount === 0) {
+        throw new HttpError(404, "File not found", "FILE_NOT_FOUND");
+      }
+    }
+
     const result = await this.db.query<AuditEvent>(
-      `SELECT id, file_id, user_id, event_type, ttl_seconds, expires_at, created_at
+      `SELECT id, file_id, user_id, event_type, ttl_seconds, expires_at, metadata, created_at
        FROM audit_events
        WHERE file_id = $1
        ORDER BY created_at DESC`,
@@ -280,11 +453,20 @@ export class FileService {
     eventType: string;
     ttlSeconds: number | null;
     expiresAt: string | null;
+    metadata?: Record<string, unknown> | null;
   }): Promise<void> {
     await this.db.query(
-      `INSERT INTO audit_events (id, file_id, user_id, event_type, ttl_seconds, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [randomUUID(), event.fileId, event.userId, event.eventType, event.ttlSeconds, event.expiresAt],
+      `INSERT INTO audit_events (id, file_id, user_id, event_type, ttl_seconds, expires_at, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        randomUUID(),
+        event.fileId,
+        event.userId,
+        event.eventType,
+        event.ttlSeconds,
+        event.expiresAt,
+        event.metadata ? JSON.stringify(event.metadata) : null,
+      ],
     );
   }
 }

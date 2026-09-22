@@ -247,4 +247,149 @@ describe("API integration", () => {
     const body = (await download.json()) as { code: string };
     expect(body.code).toBe("LINK_REVOKED");
   });
+
+  it("renames a file via PATCH and audits the change", async () => {
+    const form = new FormData();
+    form.append("file", new File([Buffer.from("x")], "old-name.txt"));
+    const upload = await app.request("/files", {
+      method: "POST",
+      headers: { "X-User-Id": "user-a" },
+      body: form,
+    });
+    const uploaded = (await upload.json()) as { file: { id: string } };
+
+    const patch = await app.request(`/files/${uploaded.file.id}`, {
+      method: "PATCH",
+      headers: { "X-User-Id": "user-a", "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "new-name.txt" }),
+    });
+    expect(patch.status).toBe(200);
+    const patched = (await patch.json()) as { file: { filename: string } };
+    expect(patched.file.filename).toBe("new-name.txt");
+
+    const forbiddenPatch = await app.request(`/files/${uploaded.file.id}`, {
+      method: "PATCH",
+      headers: { "X-User-Id": "user-b", "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "hijacked.txt" }),
+    });
+    expect(forbiddenPatch.status).toBe(403);
+
+    const audit = await app.request(`/files/${uploaded.file.id}/audit`, {
+      headers: { "X-User-Id": "user-a" },
+    });
+    const events = (await audit.json()) as {
+      events: Array<{ eventType: string; metadata: Record<string, unknown> | null }>;
+    };
+    const renameEvent = events.events.find((e) => e.eventType === "file_renamed");
+    expect(renameEvent?.metadata).toMatchObject({
+      previousFilename: "old-name.txt",
+      filename: "new-name.txt",
+    });
+  });
+
+  it("deletes a file, cleans up the blob, and preserves audit history after deletion", async () => {
+    const form = new FormData();
+    form.append("file", new File([Buffer.from("delete me")], "gone.txt"));
+    const upload = await app.request("/files", {
+      method: "POST",
+      headers: { "X-User-Id": "user-a" },
+      body: form,
+    });
+    const uploaded = (await upload.json()) as { file: { id: string } };
+
+    const forbiddenDelete = await app.request(`/files/${uploaded.file.id}`, {
+      method: "DELETE",
+      headers: { "X-User-Id": "user-b" },
+    });
+    expect(forbiddenDelete.status).toBe(403);
+
+    const del = await app.request(`/files/${uploaded.file.id}`, {
+      method: "DELETE",
+      headers: { "X-User-Id": "user-a" },
+    });
+    expect(del.status).toBe(200);
+
+    const getAfterDelete = await app.request(`/files/${uploaded.file.id}`, {
+      headers: { "X-User-Id": "user-a" },
+    });
+    expect(getAfterDelete.status).toBe(404);
+
+    // Audit history for the deleted file must survive the deletion.
+    const audit = await app.request(`/files/${uploaded.file.id}/audit`, {
+      headers: { "X-User-Id": "user-a" },
+    });
+    expect(audit.status).toBe(200);
+    const events = (await audit.json()) as { events: Array<{ eventType: string }> };
+    expect(events.events.map((e) => e.eventType)).toContain("file_deleted");
+
+    // A different user must not be able to read this now-deleted file's audit log.
+    const auditForbidden = await app.request(`/files/${uploaded.file.id}/audit`, {
+      headers: { "X-User-Id": "user-b" },
+    });
+    expect(auditForbidden.status).toBe(404);
+  });
+
+  it("batch uploads multiple files, isolating per-file failures", async () => {
+    const form = new FormData();
+    form.append("files", new File([Buffer.from("one")], "one.txt"));
+    form.append("files", new File([Buffer.from("")], "empty.txt"));
+    form.append("files", new File([Buffer.from("three")], "three.txt"));
+
+    const batch = await app.request("/files/batch", {
+      method: "POST",
+      headers: { "X-User-Id": "user-a" },
+      body: form,
+    });
+    expect(batch.status).toBe(207);
+    const result = (await batch.json()) as {
+      uploaded: Array<{ filename: string }>;
+      failed: Array<{ filename: string; code: string }>;
+    };
+    expect(result.uploaded.map((f) => f.filename).sort()).toEqual([
+      "one.txt",
+      "three.txt",
+    ]);
+    expect(result.failed).toEqual([
+      { filename: "empty.txt", error: "Empty files are not allowed", code: "EMPTY_FILE" },
+    ]);
+
+    const list = await app.request("/files", { headers: { "X-User-Id": "user-a" } });
+    const listed = (await list.json()) as { files: unknown[] };
+    expect(listed.files).toHaveLength(2);
+  });
+
+  it("batch deletes multiple files, isolating per-file failures", async () => {
+    const uploadOne = async (name: string, userId: string) => {
+      const form = new FormData();
+      form.append("file", new File([Buffer.from(name)], name));
+      const res = await app.request("/files", {
+        method: "POST",
+        headers: { "X-User-Id": userId },
+        body: form,
+      });
+      const body = (await res.json()) as { file: { id: string } };
+      return body.file.id;
+    };
+
+    const idA = await uploadOne("a.txt", "user-a");
+    const idB = await uploadOne("b.txt", "user-a");
+    const idOther = await uploadOne("c.txt", "user-b");
+
+    const batchDelete = await app.request("/files/batch-delete", {
+      method: "POST",
+      headers: { "X-User-Id": "user-a", "Content-Type": "application/json" },
+      body: JSON.stringify({ fileIds: [idA, idB, idOther] }),
+    });
+    expect(batchDelete.status).toBe(207);
+    const result = (await batchDelete.json()) as {
+      deleted: string[];
+      failed: Array<{ fileId: string; code: string }>;
+    };
+    expect(result.deleted.sort()).toEqual([idA, idB].sort());
+    expect(result.failed).toEqual([{ fileId: idOther, error: "You do not own this file", code: "FORBIDDEN" }]);
+
+    const list = await app.request("/files", { headers: { "X-User-Id": "user-a" } });
+    const listed = (await list.json()) as { files: unknown[] };
+    expect(listed.files).toHaveLength(0);
+  });
 });

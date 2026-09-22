@@ -16,6 +16,7 @@ const envSchema = z.object({
     .min(1, "DATABASE_URL is required, e.g. postgres://user:pass@host:5432/db")
     .default("postgres://postgres:postgres@127.0.0.1:5432/signed_file_api"),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+  MAX_BATCH_SIZE: z.coerce.number().int().positive().max(200).default(20),
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {

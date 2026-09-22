@@ -19,6 +19,7 @@ export type AuditEvent = {
   event_type: string;
   ttl_seconds: number | null;
   expires_at: string | null;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -63,18 +64,28 @@ const MIGRATIONS_SQL = `
   CREATE INDEX IF NOT EXISTS idx_signed_links_file_id ON signed_links(file_id);
   CREATE INDEX IF NOT EXISTS idx_signed_links_signature ON signed_links(signature);
 
+  -- Audit events intentionally have NO foreign key to files: an audit trail
+  -- must outlive the resource it describes (e.g. a "file_deleted" event has
+  -- to remain queryable after the file row itself is gone).
   CREATE TABLE IF NOT EXISTS audit_events (
     id UUID PRIMARY KEY,
-    file_id UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    file_id UUID NOT NULL,
     user_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     ttl_seconds INTEGER,
     expires_at TIMESTAMPTZ,
+    metadata JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE INDEX IF NOT EXISTS idx_audit_file_id ON audit_events(file_id);
   CREATE INDEX IF NOT EXISTS idx_audit_user_id ON audit_events(user_id);
+
+  -- Migration guard: earlier schema versions created audit_events with a
+  -- CASCADE foreign key to files. Drop it so deleting a file no longer
+  -- erases its audit history, and add columns introduced since then.
+  ALTER TABLE audit_events DROP CONSTRAINT IF EXISTS audit_events_file_id_fkey;
+  ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS metadata JSONB;
 `;
 
 export async function openDatabase(config: AppConfig): Promise<Pool> {

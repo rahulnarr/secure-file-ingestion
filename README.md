@@ -48,22 +48,46 @@ All owner endpoints require header `X-User-Id`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Liveness |
-| `POST` | `/files` | Upload multipart field `file` |
+| `POST` | `/files` | Upload one file, multipart field `file` — accepts a file + user id, generates the file id |
+| `POST` | `/files/batch` | Batch upload, multipart field `files` repeated per file (max `MAX_BATCH_SIZE`); per-file failures are isolated |
 | `GET` | `/files` | List caller's files |
 | `GET` | `/files/:fileId` | File metadata (owner only) |
+| `PATCH` | `/files/:fileId` | Update metadata for a file owned by the caller — body `{ "filename": "new-name.pdf" }` |
+| `DELETE` | `/files/:fileId` | Delete a file owned by the caller (removes blob + DB row; audit history is preserved) |
+| `POST` | `/files/batch-delete` | Batch delete — body `{ "fileIds": ["..."] }`; per-id failures are isolated |
 | `POST` | `/files/:fileId/sign` | Body `{ "ttlSeconds": 300 }` → signed URL, persisted in Postgres |
 | `GET` | `/files/:fileId/links` | List all signed links generated for a file, with `active`/`revoked` status |
 | `POST` | `/files/:fileId/links/:linkId/revoke` | Revoke an active signed link before it expires |
-| `GET` | `/files/:fileId/audit` | Full audit trail: generation, downloads, rejections, revocations (owner only) |
+| `GET` | `/files/:fileId/audit` | Full audit trail: generation, downloads, rejections, revocations, renames, deletes (owner only, survives file deletion) |
 | `GET` | `/download?fileId=&expires=&sig=` | Public download via signed URL (crypto check + Postgres revocation check) |
+
+All `/files*` endpoints require the `X-User-Id` header. Batch endpoints return `201` when every item succeeds, `207 Multi-Status` when some fail (with per-item `error`/`code` detail so a client can retry just the failures), and never abort the whole batch because one item was bad.
 
 ### Example
 
 ```bash
-# Upload
+# Upload a single file
 curl -s -X POST http://127.0.0.1:3847/files \
   -H 'X-User-Id: alice' \
   -F 'file=@./README.md'
+
+# Batch upload
+curl -s -X POST http://127.0.0.1:3847/files/batch \
+  -H 'X-User-Id: alice' \
+  -F 'files=@./a.txt' -F 'files=@./b.txt'
+
+# Rename (replace FILE_ID)
+curl -s -X PATCH http://127.0.0.1:3847/files/FILE_ID \
+  -H 'X-User-Id: alice' -H 'Content-Type: application/json' \
+  -d '{"filename":"renamed.txt"}'
+
+# Delete
+curl -s -X DELETE http://127.0.0.1:3847/files/FILE_ID -H 'X-User-Id: alice'
+
+# Batch delete
+curl -s -X POST http://127.0.0.1:3847/files/batch-delete \
+  -H 'X-User-Id: alice' -H 'Content-Type: application/json' \
+  -d '{"fileIds":["FILE_ID_1","FILE_ID_2"]}'
 
 # Sign (replace FILE_ID)
 curl -s -X POST http://127.0.0.1:3847/files/FILE_ID/sign \
@@ -86,6 +110,7 @@ curl -OJ '<downloadUrl>'
 | `UPLOAD_DIR` | `./data/uploads` | Non-public blob directory (local disk) |
 | `DATABASE_URL` | `postgres://postgres:postgres@127.0.0.1:5432/signed_file_api` | Postgres connection string for `files` / `signed_links` / `audit_events` |
 | `MAX_UPLOAD_BYTES` | `26214400` | Upload size limit (25 MiB) |
+| `MAX_BATCH_SIZE` | `20` | Max files per batch upload / max ids per batch delete |
 
 ## Testing
 
