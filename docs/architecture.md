@@ -1,65 +1,22 @@
 # Architecture: Signed File API
 
-High-level request lifecycle and data flow for private uploads and cryptographically signed downloads.
+High-level view of who talks to what. Every API call — upload, list/rename/delete, sign, revoke, audit, or a public download — reduces to the same shape: a client hits the API running on the Droplet, which reads/writes file bytes on local disk and metadata/links/audit in Managed PostgreSQL.
 
 ```mermaid
-flowchart TD
-  subgraph clients [Clients]
-    Owner[Authenticated owner<br/>X-User-Id]
-    Recipient[Anyone with a signed URL]
+flowchart LR
+  Owner([File owner<br/>X-User-Id]) -->|"upload · list/rename/delete<br/>sign · revoke · audit"| API
+  Recipient([Anyone with a signed link]) -->|download| API
+
+  subgraph Droplet [DigitalOcean Droplet]
+    API[signed-file-api]
+    Disk[(Local disk:<br/>file bytes)]
+    API --- Disk
   end
 
-  subgraph api [signed-file-api]
-    Upload["POST /files<br/>POST /files/batch"]
-    Meta["GET /files<br/>GET /files/:id<br/>PATCH /files/:id"]
-    Delete["DELETE /files/:id<br/>POST /files/batch-delete"]
-    Sign["POST /files/:id/sign"]
-    Links["GET /files/:id/links<br/>POST /files/:id/links/:linkId/revoke"]
-    Audit["GET /files/:id/audit"]
-    Download["GET /download?fileId&expires&sig"]
-    Signer[HMAC-SHA256 signer<br/>fileId + TTL -> signature<br/>shared SIGNING_SECRET]
-    Guard[Signature + expiry validator<br/>stateless, no DB read]
-  end
-
-  subgraph storage [Persistence]
-    FS[(Non-public local uploads directory<br/>file bytes)]
-    PG[(PostgreSQL<br/>files · signed_links · audit_events)]
-  end
-
-  Owner --> Upload
-  Upload --> FS
-  Upload --> PG
-
-  Owner --> Meta
-  Meta --> PG
-
-  Owner --> Delete
-  Delete -->|remove blob| FS
-  Delete -->|delete row + cascade signed_links| PG
-  Delete -->|audit: file_deleted<br/>survives the delete| PG
-
-  Owner --> Sign
-  Sign --> Signer
-  Sign -->|persist signature, TTL, expiry| PG
-  Sign -->|audit: signed_link_generated| PG
-  Sign -->|signed URL| Owner
-
-  Owner --> Links
-  Links --> PG
-
-  Owner -->|share URL| Recipient
-  Recipient --> Download
-  Download --> Guard
-  Guard -->|1. crypto valid?| PG
-  PG -->|2. exists & not revoked?| Guard
-  Guard -->|valid| FS
-  Guard -->|invalid, expired, or revoked| Recipient
-  FS -->|file bytes| Recipient
-  Download -->|audit: downloaded / rejected| PG
-
-  Owner --> Audit
-  Audit --> PG
+  API --> PG[(Managed PostgreSQL:<br/>metadata · signed links · audit)]
 ```
+
+The [request-by-request lifecycle](#lifecycle-notes) below fills in what each call actually does; the [layered request flow](#layered-request-flow-controller--service--repository) and [exceptions/retries](#exceptions-logging-and-retries) sections after that show the internal structure for engineers extending the service. See [Scalability & future architecture](#scalability--future-architecture) for how this evolves under load.
 
 ## Lifecycle notes
 
@@ -153,3 +110,31 @@ flowchart LR
 - **Metadata, signed links, and audit events** live in a DigitalOcean **Managed PostgreSQL** cluster — same `DATABASE_URL`-driven config as local dev, no code changes.
 - **Caddy** terminates TLS (automatic, once a domain is pointed at the Droplet) and reverse-proxies to the app, which only listens on `127.0.0.1`; the DO Firewall exposes just 22/80/443.
 - See [`infra/README.md`](../infra/README.md) for the exact provisioning and deploy commands, and `.github/workflows/deploy.yml` for the CI/CD pipeline that runs the test suite before every deploy.
+
+## Scalability & future architecture
+
+The current setup (one Droplet, local disk, synchronous writes) is deliberately the simplest thing that's actually correct and deployable. It has two structural limits worth planning for before they become a problem: **the API can't scale horizontally** because each instance owns its own local disk, and **every request pays for a synchronous Postgres write** even for things that don't need to block the response (audit logging, link-generation bookkeeping).
+
+```mermaid
+flowchart LR
+  Client([Client]) --> LB[Load balancer]
+  LB --> API1[API instance]
+  LB --> API2[API instance ...N]
+
+  API1 & API2 -->|blob read/write| Spaces[(DO Spaces:<br/>file bytes, S3-compatible)]
+  API1 & API2 -->|ownership / metadata reads| PG[(PostgreSQL primary)]
+  API1 & API2 -->|publish: link.generated,<br/>audit.event| Kafka[[Kafka]]
+
+  Kafka --> Workers[Async consumer workers]
+  Workers -->|write: signed_links,<br/>audit_events| PG
+
+  PG -.->|replication| Replicas[(Read replicas)]
+```
+
+**Decouple writes from the request path with Kafka.** Generating a signed link and recording an audit event are both writes that don't need to complete before the API responds. Publishing `link.generated` / `audit.event` to Kafka and letting async consumer workers persist them to Postgres means a spike in link-generation or audit-heavy traffic gets absorbed by the topic's backlog instead of directly hammering the database's write throughput or slowing down the request. The `/download` path's revocation check still needs a synchronous read, so it stays as-is — this is specifically for the write-heavy, latency-insensitive side.
+
+**Move file bytes to DO Spaces.** Local disk is why the API can only run as one instance today. Once blobs live in S3-compatible object storage instead, any API instance can serve any file, which is what actually unlocks horizontal scaling behind a load balancer — this is the same App Platform vs. Droplet tradeoff from earlier in this document, just resolved differently once statelessness is worth the extra moving part.
+
+**Scale PostgreSQL two ways.** Vertically (a bigger Managed Database tier) is the first lever and needs zero application changes. Horizontally, read replicas offload the read-heavy paths (listing files, fetching metadata, ownership checks) from the primary, which then only has to handle writes. For the `audit_events` table specifically — the one table that grows unboundedly — range-partitioning by `created_at` (e.g. monthly partitions) keeps individual indexes small and makes retention (dropping old partitions) cheap compared to `DELETE` at scale.
+
+**Add alpha/beta environments to CI/CD.** Right now `main` deploys straight to production once tests pass. The natural next step is `alpha` → `beta` → `production` as separate Droplets/environments, each gated by the same test suite plus its own integration-test coverage report, so a regression surfaces in alpha traffic before it reaches real users — the same tests, staged, not new ones.

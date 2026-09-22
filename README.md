@@ -13,7 +13,9 @@ Production-oriented REST service for private file uploads, metadata management, 
 - **Typed exceptions** — every thrown error derives from a common `AppError` base carrying a machine-readable `code`, HTTP `statusCode`, `isRetryable` flag, structured `context`, and the original low-level cause, for fast incident triage
 - **Structured logging** — every request failure is logged (via `pino`) with full error metadata at the HTTP boundary, regardless of which layer it came from
 - **Exponential retry with a bounded budget** — transient Postgres and filesystem failures (connection resets, deadlocks, lock contention, `EBUSY`/`EAGAIN`) are retried with exponential backoff + jitter, capped by both an attempt count and a wall-clock time budget, applied uniformly to every repository and to blob storage
-- **Production basics** — input validation, typed errors, Vitest coverage, GitHub Actions CI
+- **Metrics** — HTTP request volume/latency and per-layer failure counts, in Prometheus text format at `GET /metrics`; point Prometheus or the Datadog Agent's OpenMetrics check at it with zero code changes
+- **API documentation** — every endpoint is described in an OpenAPI 3.0 spec (`GET /openapi.json`) with an interactive explorer at `GET /docs`
+- **Production basics** — input validation, typed errors, ≥80% unit test coverage (enforced in CI), GitHub Actions CI/CD
 
 ## Architecture
 
@@ -67,6 +69,9 @@ All owner endpoints require header `X-User-Id`.
 | `POST` | `/files/:fileId/links/:linkId/revoke` | Revoke an active signed link before it expires |
 | `GET` | `/files/:fileId/audit` | Full audit trail: generation, downloads, rejections, revocations, renames, deletes (owner only, survives file deletion) |
 | `GET` | `/download?fileId=&expires=&sig=` | Public download via signed URL (crypto check + Postgres revocation check) |
+| `GET` | `/metrics` | Prometheus text-format metrics — request volume/latency, per-layer error counts, retry counts |
+| `GET` | `/docs` | Interactive Swagger UI for the full API |
+| `GET` | `/openapi.json` | Raw OpenAPI 3.0 spec backing `/docs` |
 
 All `/files*` endpoints require the `X-User-Id` header. Batch endpoints return `201` when every item succeeds, `207 Multi-Status` when some fail (with per-item `error`/`code` detail so a client can retry just the failures), and never abort the whole batch because one item was bad.
 
@@ -136,13 +141,19 @@ docker compose up -d postgres
 # create the test DB once:
 PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE signed_file_api_test;"
 
-npm test                  # everything
-npm run test:unit         # services against in-memory fakes; no database needed
-npm run test:integration  # full HTTP stack against real Postgres
+npm test                    # everything
+npm run test:unit           # services against in-memory fakes; no database needed
+npm run test:unit:coverage  # same, plus a coverage report; CI fails below 80% lines/branches/functions/statements
+npm run test:integration    # full HTTP stack against real Postgres
 npm run typecheck
 ```
 
-CI (`.github/workflows/ci.yml`) spins up a Postgres service container automatically — no local setup needed there.
+CI (`.github/workflows/ci.yml`) runs two independent jobs on every push/PR:
+
+- **`unit-tests`** — typecheck, unit tests with coverage, uploads the HTML/lcov report as a build artifact. The coverage threshold (80% lines/branches/functions/statements) is scoped to business logic — services, mappers, and infrastructure utilities — not thin HTTP adapters (controllers/routes), which the integration suite covers instead.
+- **`integration-tests`** — spins up a Postgres service container, runs an explicit `pg_isready` connectivity check as its own visible step (not just the container's internal healthcheck), then the full HTTP-level test suite.
+
+`.github/workflows/deploy.yml` depends on both (via `workflow_call`) before it deploys — see [infra/README.md](infra/README.md) for the additional Droplet-reachability and Postgres-connectivity checks that run before every production deploy.
 
 ## Code structure
 
@@ -177,12 +188,13 @@ Retries are handled by `src/infrastructure/resilience/`, applied at the **reposi
 ```
 src/
   index.ts                         Bootstrap: config -> DB -> container -> HTTP server
-  app.ts                           Mounts module routes, auth middleware, error handlers
-  container.ts                     Composition root (dependency wiring, incl. retry wrapping)
+  app.ts                           Mounts module routes, middleware, error handlers, /docs
+  container.ts                     Composition root (dependency wiring, incl. retry + metrics wrapping)
   config/env.ts                    Single source of env + configurable values (zod-validated)
+  docs/openapi.ts                  Hand-authored OpenAPI 3.0 document (served at /openapi.json, /docs)
   common/
     errors/                        AppError base, HttpError, domain/infrastructure errors, handlers
-    middleware/require-user.ts     X-User-Id authentication
+    middleware/                    X-User-Id auth, HTTP metrics recording
     types/app-env.ts               Typed request context
     validation/                    UUID, batch-size, JSON body parsing helpers
   infrastructure/
@@ -190,6 +202,7 @@ src/
     storage/                       BlobStorage interface + LocalBlobStorage
     crypto/url-signer.ts           HMAC-SHA256 sign/verify (fileId + TTL)
     logging/logger.ts              Structured logger (pino)
+    metrics/metrics.ts             Prometheus counters/histograms (prom-client)
     resilience/                    Error classifiers, backoff, retrying proxy
   modules/
     files/                         upload, batch upload, list, get, update, delete, batch delete
@@ -199,10 +212,12 @@ src/
     downloads/                     public signed-URL download
     audit/                         record + list audit events
     health/                        liveness
+    metrics/                       GET /metrics
 tests/
-  unit/                            Services + signer with in-memory fakes (tests/unit/fakes.ts)
+  unit/                            Services + infra with in-memory fakes (tests/unit/fakes.ts); ≥80% coverage
   integration/                     Full HTTP stack against Postgres
-docs/architecture.md               Request lifecycle diagram
+vitest.config.ts                   Coverage scope + 80% thresholds
+docs/architecture.md               Request lifecycle + scalability diagrams
 ```
 
 ## Design choices
@@ -211,3 +226,5 @@ docs/architecture.md               Request lifecycle diagram
 - **Two-phase download validation** — the public `/download` endpoint first does a cheap in-memory HMAC + expiry check (rejects garbage instantly), then a Postgres lookup only for links that pass crypto validation (confirms provenance + not revoked).
 - **Local disk for blobs, Postgres for state** — file bytes stay on local disk (fits a single Droplet with a persistent volume); structured data (metadata, links, audit) lives in Postgres so it can point at a Managed Database in production without code changes.
 - **Identity via `X-User-Id`** — keeps the exercise focused on file security; wire real auth (JWT/OIDC) at the edge in a full deployment.
+- **Prometheus text format for metrics, not a vendor SDK** — `GET /metrics` is scrapeable by Prometheus or the Datadog Agent's Prometheus/OpenMetrics check as-is. Migrating to a hosted metrics backend later is a scrape-config change, not an application code change.
+- **Coverage thresholds scoped to logic, not wiring** — the 80% unit-coverage gate (`vitest.config.ts`) covers services, mappers, and infrastructure utilities. Controllers and routes are thin HTTP adapters exercised by the integration suite instead; enforcing a unit-test number on them would reward testing framework glue rather than behavior.
