@@ -39,10 +39,18 @@ id -u "$APP_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$APP_USER"
 mkdir -p "$APP_DIR"
 chown "$APP_USER:$APP_USER" "$APP_DIR"
 
+# `doctl compute droplet create --ssh-keys` only authorizes root; CI/CD
+# deploys as $APP_USER over SSH, so it needs the same key authorized here.
+mkdir -p "/home/$APP_USER/.ssh"
+cp /root/.ssh/authorized_keys "/home/$APP_USER/.ssh/authorized_keys"
+chown -R "$APP_USER:$APP_USER" "/home/$APP_USER/.ssh"
+chmod 700 "/home/$APP_USER/.ssh"
+chmod 600 "/home/$APP_USER/.ssh/authorized_keys"
+
 # Let the deploy user restart the app service and reload Caddy without a
 # password (needed for the CI/CD SSH deploy step).
 cat > /etc/sudoers.d/signed-file-api-deploy <<SUDOERS
-$APP_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart signed-file-api, /usr/bin/systemctl status signed-file-api
+$APP_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart signed-file-api, /usr/bin/systemctl status signed-file-api*
 SUDOERS
 chmod 440 /etc/sudoers.d/signed-file-api-deploy
 
