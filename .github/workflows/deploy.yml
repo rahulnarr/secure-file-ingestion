@@ -1,8 +1,9 @@
 name: Deploy
 
-# Runs the full test suite (via ci.yml) and only deploys to the
-# DigitalOcean Droplet if it passes. See infra/README.md for the one-time
-# server setup this depends on, and the repository secrets it requires.
+# Runs the full test suite (via ci.yml), verifies the target infrastructure
+# is actually reachable, and only then deploys to the DigitalOcean Droplet.
+# See infra/README.md for the one-time server setup this depends on, and
+# the repository secrets it requires.
 on:
   push:
     branches: [main]
@@ -12,8 +13,46 @@ jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
-  deploy:
+  verify-droplet:
     needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the Droplet's SSH port is reachable
+        run: |
+          for i in $(seq 1 10); do
+            if nc -z -w 5 "${{ secrets.DROPLET_HOST }}" 22; then
+              echo "Droplet is up and accepting SSH connections"
+              exit 0
+            fi
+            echo "Waiting for the Droplet... ($i/10)"
+            sleep 5
+          done
+          echo "Droplet did not become reachable in time" >&2
+          exit 1
+
+  verify-database:
+    needs: verify-droplet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The Managed Postgres firewall only allows connections from the
+      # Droplet itself, so this check runs *from* the Droplet over SSH
+      # rather than directly from the runner — a separate, visible step
+      # from the actual deploy that follows.
+      - name: Check Postgres connectivity from the Droplet
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: deploy
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            PGCONNECT_TIMEOUT=10 psql "${{ secrets.DATABASE_URL }}" -c "select 1" >/dev/null
+            echo "Postgres is reachable from the Droplet"
+
+  deploy:
+    needs: [test, verify-droplet, verify-database]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production

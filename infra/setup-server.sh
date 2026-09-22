@@ -15,7 +15,11 @@ APP_USER="deploy"
 
 echo "==> Installing base packages"
 apt-get update -y
-apt-get install -y curl git ca-certificates gnupg ufw
+# postgresql-client (psql) backs the CI/CD "verify Postgres connectivity from
+# the Droplet" step in .github/workflows/deploy.yml — the Managed Postgres
+# firewall only allows connections from this Droplet, so that check has to
+# run here, not from the GitHub Actions runner.
+apt-get install -y curl git ca-certificates gnupg ufw postgresql-client
 
 echo "==> Installing Node.js 22"
 if ! command -v node >/dev/null || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
